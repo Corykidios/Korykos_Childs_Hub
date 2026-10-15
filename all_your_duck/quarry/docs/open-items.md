@@ -1,0 +1,402 @@
+# Open items
+
+Gaps in the shipped code, deferred work, and decisions nobody has made yet.
+Decisions already made are in [decisions.md](context/decisions.md).
+
+## Known problems
+
+- **`in` on zoned columns of frame-backed relations**: an `in` filter with two
+  or more items on a tz-aware column of a relation over an in-memory frame needs
+  `pytz`. DuckDB imports it for the scan, and Quarry does not depend on it.
+  Fails loudly with `InvalidInputException`; `eq` and relations over parquet are
+  unaffected.
+- **Open DuckDB result streams get cut short**: a result left open across steps
+  on the shared connection is truncated by the next query, including the
+  kernel's own previews and view queries. Silent: a probe read 100,000 of
+  3,000,000 rows with status `ok`. After an interrupt, the stream fails loudly
+  instead.
+- **A running polars `collect()` ignores interrupts**: the `KeyboardInterrupt`
+  lands only once the collect finishes, so a long collect cannot be stopped.
+  Silent: `interrupt` reports the signal delivered, and the step keeps running.
+- **Four RPCs cannot be interrupted**: `describe`, `list_datasets`, `query` and
+  `snapshot` run outside the guarded regions, so a slow relation preview, query
+  or snapshot holds the kernel until it ends. Silent: `interrupt` answers
+  `delivered: false`.
+- **Previews run eagerly**: every step describes its writes, so a LazyFrame or
+  relation runs its plan as soon as it is assigned. Silent cost, with no error.
+- **Stale previews from outside a step**: the kernel clears cached dataset
+  metadata only when a step runs, so a parquet file rewritten under a LazyFrame,
+  or a DuckDB file another process writes, shows an old preview until the next
+  step. Silent.
+- **Time and UUID filters**: an ISO string against a Time column fails on the
+  polars target with `InvalidOperationError`, since only Date and Datetime
+  literals are coerced. Relation UUID columns are described as String, yet
+  `contains` and `starts_with` on them raise DuckDB's `BinderException`. Both
+  fail loudly; `eq` on a UUID works.
+- **Targets disagree on loosely typed literals**: a string against an integer
+  column, or a datetime-shaped string against a Date column, filters on a
+  relation but raises on a polars backing. A malformed ISO date raises a bare
+  `ValueError` that does not name the column. Loud on polars backings; silent
+  coercion on relations.
+- **Unchecked list items and pivot errors**: nested lists or objects inside
+  `in`, `not_in` and `between` values pass validation and fail in the engine.
+  Errors inside a pivot spec surface as raw polars errors. Both fail loudly.
+- **Unsorted group-by and pivot rows have no fixed order**: without a `sort`,
+  row order can change between runs and between targets. Silent; paging with
+  offsets would skip or repeat groups.
+- **Relation intervals sort and filter as text**: INTERVAL columns of relations
+  are projected as VARCHAR, so `9 days` sorts after `100 days`. Silent.
+- **Odd temporal values**: DuckDB `'infinity'` in a TIMESTAMP_S or TIMESTAMP_NS
+  column arrives as a wrong in-range date, 1969-12-31 or 2262-04-11. TIMETZ
+  arrives as Time with its offset dropped. Both silent.
+- **Large and opaque integers in JSON rows**: 64-bit and 128-bit integers above
+  2^53, including sums over 128-bit columns, are JSON numbers, which JavaScript
+  rounds. VARINT and BIT values arrive as base64 of DuckDB's internal bytes.
+  Both silent.
+- **Lineage blind spots**: lineage reads table names only from a string literal
+  passed first to `sql_local(...)` or any `.sql(...)` call, so SQL built at run
+  time (an f-string, a variable) and literals passed to `.execute(...)` or
+  `.query(...)` add no reads. Helpers bound without `def` or `class` (lambdas,
+  `partial`, imports) are invisible, and so is in-place mutation inside a
+  function, such as a helper that sets `df.columns`. A literal reading
+  `FROM RECENT` is not matched to dataset `recent`, though DuckDB's catalog
+  ignores case. Silent: a saved recipe can miss a source step.
+- **Scalar and dictionary recipe inputs**: earlier ordinary bindings can be
+  omitted from a saved recipe. A result that reads `params["scale"]` can save
+  without the step that defined `params`, then fail fresh replay with
+  `NameError`. The static analyzer already collects these names; track their
+  producers in the [executor](../src/quarry/kernel/executor.py) and
+  [step lineage](../src/quarry/server/models.py), then follow them during
+  [recipe traversal](../src/quarry/projects/recipe.py).
+- **Lineage approximations**: a failed step's in-place mutation is not a write,
+  while a successful step's store that never ran is one. Class bodies report
+  every name they load as a read, and a SQL literal's CTE named like a dataset
+  (`WITH df AS (...) SELECT * FROM df`) reads that dataset, since DuckDB's
+  parser does not resolve CTEs; both only add steps to a recipe. Silent; see
+  [decisions](context/decisions.md#lineage).
+- **Interrupts stop only the kernel's DuckDB connection**: DuckDB workers for a
+  relation on a researcher's own `duckdb.connect()` can keep running after an
+  interrupt. Silent: they hold CPU and delay that connection's next query.
+- **A step's child can outlive the kernel**: a process a step started that calls
+  `setsid` leaves the kernel's process group, so `close()` does not kill it.
+  Silent.
+- **No memory cap on macOS**: macOS rejects `RLIMIT_DATA`, so the kernel runs
+  uncapped. Silent to the client; the only sign is one line on the kernel's
+  stderr.
+- **Small memory caps need a thread cap**: on Linux `RLIMIT_DATA` counts thread
+  stacks, so with every core in use a small cap kills the kernel as polars
+  starts, as 256 MB on 14 cores did. Loud: the kernel dies. `kernel_threads`
+  avoids it.
+- **`close()` right after `shutdown()` can cut off a snapshot**: `close()` sends
+  SIGKILL at once, so a snapshot still writing leaves a stray `.tmp` file beside
+  its target. The target keeps its old contents. Silent.
+- **Output tails count characters**: the spec promises the last 4 KB of output,
+  and the tail keeps 4096 characters. Silent; multi-byte output runs past 4 KB.
+- **A loader that hangs at import hangs startup**: the server imports loaders to
+  describe them to the agent, and each kernel imports them at start. Loud only
+  through a stderr notice naming the loader after 10 s.
+- **Some cache layouts are hidden or misread**: `scan_layout` skips an
+  unreadable directory without a log line, and misses a dataset whose parquet
+  files sit only in nested directories not named `key=value`. A dangling
+  `*.parquet` symlink still lists its dataset. Silent.
+- **Cancel waits for the model**: `/interrupt` and `/restart` stop a prompt step
+  only once the provider answers the call in flight, bounded only by the
+  provider client's timeout. Meanwhile `/restart` holds its request, a second
+  restart gets 409, and under uvicorn a graceful Ctrl-C waits too. Silent.
+- **A crashed prompt step saves no code or transcript**: an exception other than
+  `ProviderError` or `KernelDead` saves the step's runs and their lineage, but
+  leaves `code` empty and saves no view or transcript. Silent.
+- **Restart can mislabel a step**: a step that a kernel crash or the
+  researcher's cancel ended right before a restart is saved with "stopped by a
+  restart". Silent; the status is right.
+- **A stuck kernel holds the manager lock**: `KernelManager.kill` and `restart`
+  close the old client under the manager's lock, and `close()` waits up to 5 s
+  for a killed kernel, so every session's kernel lookup waits too. Silent.
+- **`origin_step` can name a step replay dropped**: replay skips interrupted
+  runs and stops at the first failure, but `/datasets` still credits the latest
+  saved writer. After a step that rebound `df` is interrupted and the session
+  restarts, `df` holds the older data and names the interrupted step. Silent.
+- **Saving a step stalls every route**: `_finish` writes and fsyncs the step
+  file and its directory under the service lock that every route takes. With a 1
+  s fsync in a probe, another session's `/status` took 2 s, so a slow filesystem
+  such as an NFS home directory stalls all sessions. A failed save also kills
+  the kernel under that lock, which can wait up to 5 s for the process to exit.
+  Silent.
+- **A kernel never started reads as `starting`**: after a server restart,
+  `/status` reports `starting` for a session whose kernel was never spawned, so
+  a client cannot tell that its namespace is empty. Silent.
+- **Restart shows no progress**: replay runs inside the `/restart` request,
+  while spec §6 wants progress in the UI. Silent until it returns.
+- **Every `/status` poll parses every step**: it loads the whole session under
+  the service lock, since no route reads one step, and `/datasets` parses every
+  step too. A silent cost that grows with the session.
+- **Prompt-step tracebacks land in the message**: a prompt step's error puts the
+  traceback in `error.message` and leaves `traceback` empty, while manual steps
+  fill `traceback`. Silent.
+- **A view can still send rows out over WebRTC or DNS**: no CSP directive covers
+  a peer connection's ICE traffic or a DNS prefetch, so a generated view can put
+  rows in a STUN host name or a prefetched name despite the runtime CSP and the
+  host's `frame-src 'self'`. Silent.
+- **Perspective dates outside years 1 to 9999**: a Date or Datetime filter term
+  beyond them maps to a `+010000-...` ISO string, which the kernel cannot parse,
+  so the pivot's probe query and "To code" fail. Loud.
+- **Perspective `in` items on integer columns**: the mapping reads items such as
+  `1e3` or `0x10` with JavaScript's `Number()` and the engine with `stoll`, so
+  the viewer and "To code" can filter different rows. Silent.
+- **A refused column choice hides the chart pickers**: every chart built-in
+  returns early on a query error, so when the kernel refuses a saved column
+  choice, the pickers that could change it are gone. Loud, and the view stays on
+  the error.
+- **The first browser test can time out on load**: in 1 of 5 local full runs,
+  the session's first Playwright test waited 30 s for the "New session" button
+  in `open_session` and failed, before any step ran; reruns passed. The cause is
+  unknown, perhaps a cold first page load. Loud: a red e2e run on that line
+  points here first.
+- **Pivot width is unbounded**: a pivot makes one column per distinct value of
+  its `columns` key, which neither `row_cap` nor `limit` bounds, so a heatmap of
+  dates by ticker over 5,000 tickers is 5,000 columns wide. A silent cost.
+- **Other local users can read the licensed libraries**: `/libs/` serves the
+  configured Highcharts and SciChart files without the token, since the
+  opaque-origin frame loads them, so on a shared machine any account that can
+  reach the loopback port can copy them while the server runs. Silent. This is
+  the Stage 3 static design; the keys stay behind the token.
+- **"To code" can rebind a plain `date`**: its generated
+  `from datetime import date` (or `datetime`, `ZoneInfo`) is refused only when
+  it would rebind a dataset, so a non-dataset global of that name, such as a
+  string, is replaced when the step runs. Silent.
+- **Perspective rounds large integers**: Arrow sends UInt64, Decimal and 128-bit
+  integers as Float64, so values past 2^53 round in the pivot, and a filter term
+  the viewer writes for one may not match the exact integer "To code" filters
+  on. Silent.
+- **Nested values in the pivot are loose JSON**: Arrow sends nested values as
+  JSON strings, which can hold `NaN` or `Infinity`, and nested bytes show as a
+  Python repr while top-level Binary is base64. Silent.
+- **Smaller Perspective mapping gaps**: `!= null` under "or" is not counted
+  toward `filter_op "or"`; a filter on a column the schema lacks reaches the
+  kernel and fails with a `QueryError`; `in` items on a Decimal column are not
+  coerced to Decimal; and sub-millisecond datetime comparisons can differ
+  between the viewer and the kernel. Mostly silent.
+- **Scrubbing can keep a later pivot layout**: `PerspectiveViewer` ignores a
+  missing `config`, so a snapshot from before the first layout keeps the later
+  one. Changing the viewer's settings, theme or title also writes view state.
+  Silent.
+- **A failed Perspective engine start sticks**: `ensureEngine` caches its
+  promise, so once the wasm fetch or the worker start fails, every pivot in that
+  frame fails until the frame reloads. Loud.
+- **A corrupt Arrow answer leaves a view loading**: `cache.ts` decodes
+  `arrow_base64` inside the success callback, so a decode error skips the error
+  branch and the query stays "Loading". Silent.
+- **A hung `GET /libraries` never mounts a view**: `ViewHost` waits for that one
+  answer with no timeout. Silent: the frame stays empty.
+- **OHLC fails on a case-only name clash**: `Close` and `close` in one dataset
+  make its select fail, and the error hides the pickers. Loud. A table's saved
+  sort also goes out before the schema loads, so a sort on a dropped column
+  fails that first query.
+- **Picked snapshots are not what "To code" and "Save view" use**: after a pick
+  in the scrubber, both use the newest snapshot. Silent.
+- **Snapshots can repeat**: switching a view A to B to A within one report
+  window appends a duplicate snapshot, and an inline view that queries from
+  local state appends one per change. Silent cost toward the 500 cap.
+- **Component save messages mislead**: a busy session answers `POST /components`
+  with 409, the code an existing id gets; `<root>/components` as a regular file
+  makes every save a 409 "folder already exists"; and "Save to library" stays
+  disabled with no message for an id over 64 characters. Loud but misleading.
+- **An export can fail on a pathological recipe**: `export._stores` catches only
+  `SyntaxError`, so a recipe that makes `analyze` raise `RecursionError` or
+  `MemoryError` fails the export; `tidy._binds` shares the pattern. Loud.
+
+## Deferred work
+
+Stage 5 was the last planned stage, so no item below belongs to a stage; take
+one up when a researcher needs it.
+
+### Any time
+
+- Sort group-by and pivot results by the group keys by default. This must land
+  before views page with offsets, or pages will skip or repeat groups.
+- Add a tie-breaker to paged sorts, because DuckDB's parallel `ORDER BY` returns
+  rows with tied keys in a different order each run.
+- Explain in the UI why an interrupt may not stop a step at once, and offer the
+  Stage 2 restart.
+- Run restart in the background and report replay progress through `/status`, as
+  spec §6 asks.
+- Add a route that reads one step, so polling stops parsing the whole session.
+- Put prompt-step tracebacks in `error.traceback`, as manual steps do.
+- Fix filter coercion for Time literals, UUID and other natively imported
+  relation columns, strings against integer columns, and datetime-shaped strings
+  against Date columns.
+- Turn spec-caused failures into errors that name the column: malformed ISO
+  dates on the polars target, unchecked nested list items and raw errors from
+  eager pivots. `to_source` already raises a `QueryError` naming the column.
+- Settle the JSON row contract with the renderer, and return null for DuckDB
+  `'infinity'` in TIMESTAMP_S and TIMESTAMP_NS columns.
+- Pre-aggregate relation pivots by index and pivot columns in SQL, because the
+  pivot now pulls every filtered row into polars.
+- Keep previous rows visible in both tables while a new sort or filter query
+  refetches. Both tables now record filters and sort in server-side query specs;
+  refreshes of the same spec already retain rows.
+- Restore the last snapshot's state on mount: a reload resets a view to
+  `initial_state` even when `view.snapshots` has later state.
+- Make `npm run dev` views work inside the null-origin frame: Vite's dev CORS
+  allowlist and its inline React preamble are both blocked there, so views
+  render only from a production build today.
+- A stale `session=` id in the hash opens a column on a 404; fall back to the
+  first session.
+- Disable the view's "Fix this view" after a successful repair, and clear a
+  replay-failure banner once a later restart succeeds.
+- `ErrorBoundary` resets only when the view id changes.
+- The Lightweight Charts attribution link is inert under the sandbox (no
+  popups).
+- Add component tests for `SessionPage` (reload keeps the session, 401 message),
+  the time series success and "needs a date column" paths, and the canvas's
+  debounced layout write and its flush on unmount.
+- Let a cleanly exiting kernel finish before `close()` kills it after
+  `shutdown()`, so an in-flight snapshot completes.
+- Map `anthropic.APIError` and `openai.APIError` to a non-retryable
+  `ProviderError` at the provider boundary. Until then, an unmapped SDK error
+  escapes a save after its pinned snapshot is staged.
+- Give recipe validation a timeout: `validate_recipe` waits on the scratch
+  kernel, so a recipe that hangs hangs the save request, which is synchronous so
+  that it can show a saving state. The session stays usable, since the hold is
+  released first.
+- A failed view recall keeps its view on the step, so the frame shows a query
+  error under the recall's traceback.
+- Canvas cards: a card is blank when its saved view fails to load, a card whose
+  view is missing has no Remove, and recall and layout errors never clear.
+- The rail's project list does not scroll, and `SaveDialog` picks its project
+  only when it opens, so a project list that arrives later leaves none chosen.
+- Count in-place mutation inside a function as a write of the frame it changes:
+  a helper that sets `df.columns` or deletes `df["k"]` is invisible to lineage,
+  as are helpers bound without `def` or `class`. Module-level attribute and
+  subscript assignment and `del` are covered. Rare in step code; revisit if a
+  recipe misses a step for that reason.
+- Read SQL built at run time (f-strings, concatenation) and literals passed to
+  `.execute(...)` or `.query(...)`: only literals given to `sql_local(...)` or
+  `.sql(...)` reach DuckDB's parser (`json_serialize_sql`). The recipe then
+  shows the missing read; a `# reads: name` comment the researcher writes is one
+  way to declare it.
+- Perspective shows at most 50,000 rows, the pivot built-in's limit and the
+  default `row_cap`. Server-side pivoting through the mapped spec is what "To
+  code" gives; the viewer stays a client-side explorer.
+- Perspective server mode and Arrow for every view stay deferred, as spec §16
+  records.
+- Inventory repeated recipes before adding workflow parameters or shared metric
+  definitions. Keep formulas in plain Python until examples establish common
+  input, output, calendar, weighting and missing-data rules.
+- Evaluate reusable time comparisons against repeated research workflows.
+- Evaluate dimension drilldown against repeated research workflows.
+- Evaluate filter bookmarks against repeated research workflows.
+- Assess financial-data adapters after their source contracts are specified.
+- Define discoverable parameter schemas after their input contracts are
+  specified.
+- Load Highcharts modules such as indicators and annotations: only
+  `highstock.js` loads. A list of entry files per library could add them.
+- Configure SciChart 3D and a wasm fallback: the loader points `wasmUrl` at
+  `_wasm/scichart.wasm` and nothing else.
+- Export a single view with `quarry projects export`, and import a `.ipynb`.
+  Neither is in the spec.
+- Keep the version in one place: `pyproject.toml` and `src/quarry/__init__.py`
+  both hold it, and the test checks only its type.
+- Open `config.toml` once in `load_config`: it checks `exists()`, opens the
+  file, then stats it again for the DSN warning, so a file swapped in between is
+  checked apart from what was read.
+- Count output tails in bytes, as the spec's "last 4 KB" says.
+- Type the op sets in `quarry/query/spec.py` as `frozenset[FilterOp]` rather
+  than `frozenset[str]`.
+- Keep TIMETZ offsets in JSON rows, and fix the Duration comment in
+  `_json_native`, which says milliseconds though the guard covers every unit.
+- Smoke-test `sql()` against the firm's SQL Server with `VARCHAR(MAX)` columns,
+  which may need arrow-odbc's `max_text_size`.
+- Close test gaps: the shutdown tests pass even if the kernel never exits. The
+  equivalence `normalize` sorts rows, so order is compared only under a limit.
+- Tighten tests further: some `match=` patterns in `test_spec.py` also match
+  pydantic's echoed input, and the polars target has no direct nulls-first test.
+- Close Stage 2 test gaps: nothing checks the arguments the OpenAI adapter sends
+  or that every tool schema stays strict.
+- Merge canvas layout writes: `CanvasPage` sends the whole card list from its
+  own copy of the layout, half a second after a drag, so a write sent after a
+  pin made elsewhere drops that card. A `set_canvas` that takes positions by
+  view, with Remove its own request, or that refuses a stale write would cover
+  every writer.
+- Check that the host's `frame-src 'self'` stops a view frame's own navigation
+  in Firefox and Safari; the Playwright test runs Chromium only.
+- Review the chart built-ins' visuals and accessibility, which no Stage 5 review
+  covered: table header sorts are mouse-only, and OHLC shows a blank pane while
+  loading.
+- Small host fixes from the Stage 5 reviews: clicking "To code" again replaces
+  code edited in the drawer, a 409's message stays while the id is edited, Stop
+  shows during a hold, "Save to library" keeps duplicate tags, and a dead
+  `basis-full`/`w-[40rem]` class remains.
+- Tidy Stage 5 code: the library statuses are computed twice at startup
+  (`create_app` and `enabled_libraries`); `to_code` builds the importable
+  projection twice per relation and runs `_imported_names` twice per polars
+  spec, and `_imported_names` repeats the filter rendering's literal coercion;
+  the Arrow cache keeps both the base64 and the decoded buffer;
+  `PerspectiveViewer` writes `latest.current` during render, as the plan wrote
+  it; `_sql_table_reads` lists `RecursionError` beside `RuntimeError`, its base
+  class; `arrow.py` and `datasets.py` repeat the `enumerate` and `pl.nth` idiom;
+  `tidy._binds` accepts a recipe whose only mention of `df` is an attribute
+  store or `del df["k"]`, which validation still catches; and
+  `@types/d3-selection` resolves to 1.0.10 through Perspective, hidden by
+  `skipLibCheck`.
+- Close Stage 5 test gaps:
+  - Server: no busy test covers a hold. Nothing pins the `RecursionError`
+    suppress in `_sql_table_reads`. The component routes lack tests for a save
+    without a dataset, a team-root 409, the 0700 folder mode and built-ins
+    listed after a save, and the transpile test's skip copies
+    `default_transpiler`'s logic.
+  - CLI: the `quarry projects` no-project-subcommand and CLI write-failure paths
+    remain untested.
+  - Other server tests: the library warning test checks only the library's name,
+    and no test checks that `/libraries` sends no CORS header. The to-code 400
+    test asserts only `"x" in detail`. `kept_default_connection` restores only
+    the uncapped settings, so a capped caller would leak them. There is no
+    regression test for `arrow.py`'s `pl.nth` fix, and no test sends an all-null
+    column to Perspective.
+  - Web and browser tests: the Perspective cache-hit test checks React's row
+    count, not the viewer's table. `ViewHost.test.tsx` is at 240 lines with
+    fixed 20 ms sleeps. `state.test.ts` uses fake timers without `try/finally`,
+    `mount.queries.test` leaves roots mounted, and two tests leave `URL`
+    patched. The ECharts browser assertion passes with zero points, and the
+    Plotly one depends on the plot's width. OHLC has no non-zero-offset or
+    microsecond case, and no browser test loads Highstock or SciChart.
+
+## Open questions
+
+- **JSON contract for the Stage 3 renderer**: decimals arrive as exact strings,
+  so every sum over integers of up to 64 bits is a string, while a 128-bit sum
+  is a number. A Map is an object when its key type allows one and no value
+  needs converting, such as Binary to base64; otherwise it is a list of
+  `{key, value}` entries, and integers above 2^53 are numbers JavaScript rounds.
+  Options: keep these and parse by schema dtype, or send large integers as
+  strings. Arrow is no way out: it casts decimals, UInt64 and 128-bit integers
+  to Float64 for Perspective.
+- **Naive timestamps and offset strings**: keep DuckDB 1.5.6's per-unit rule,
+  where only nanosecond columns convert an offset to UTC, or pick one rule for
+  every unit? The current rule follows DuckDB's cast, which an upgrade could
+  change.
+- **Restart UX**: restart always works, and it kills a running step. When the UI
+  offers or forces a restart, and what the researcher sees meanwhile, is open.
+- **Live provider calls**: neither adapter has called its real API. Whether the
+  Anthropic API accepts `fallbacks="default"` with the
+  `server-side-fallback-2026-07-01` beta, and whether `gpt-5` is the right
+  OpenAI model name, is unverified. `tests/agent/test_live_providers.py` checks
+  both once keys are set.
+- **Exact class-body lineage**: keep over-reporting class-body reads, or add
+  execution-order analysis covering conditionals, loops, `del` and `try`?
+  Over-reporting adds recipe dependencies but never drops one.
+- **Result streams on the shared connection**: should the kernel protect result
+  streams left open across steps from later queries, or only document the limit?
+  Neither option has been evaluated.
+- **Reusable workflow inputs**: which recurring research question should accept
+  a replacement universe, date range and benchmark first? Choose its calendar,
+  alignment, output names and live versus pinned refresh behavior before
+  extending save and recall.
+- **Recipe validation**: validation currently proves matching schema and row
+  count. Whether it should compare values, a sample or source identity needs a
+  product decision, especially when live recall refreshes data.
+- **Session-prefix copying**: branching remains deferred and sessions stay
+  linear. Is a new session rebuilt through a completed step with current inputs
+  sufficient, or are immutable historical inputs required? Replay skips
+  interrupted runs, can repeat external writes and reads mutable pinned paths;
+  copying a namespace cannot restore arbitrary process state.

@@ -1,0 +1,18 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual env
+venv/
+.env
+
+# OS
+.DS_Store
+
+# Personal notes
+ideas.txt
+
+# Nested gitignore (not needed)
+backend/.gitignore
+
+data/notes.json

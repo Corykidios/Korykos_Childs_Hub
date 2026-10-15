@@ -1,0 +1,106 @@
+version: '3.6'
+
+services:
+  # Do not use the postgres and postgres-upgrader services if using external
+  # database orchestrated by docker-compose.externaldb.yml
+  postgres:
+    read_only: true
+    volumes:
+      - /var/run/postgresql
+      - /opt/blackduck/hub
+      - /tmp
+  postgres-upgrader:
+    read_only: true
+    volumes:
+      - /var/run/postgresql
+      - /tmp
+  authentication:
+    read_only: true
+    volumes:
+      - /opt/blackduck/hub/hub-authentication/logs
+      - /opt/blackduck/hub/hub-authentication/conf
+      - /opt/blackduck/hub/filebeat
+      - /tmp
+  webapp:
+    read_only: true
+    volumes:
+      - /opt/blackduck/hub/downloads/logzips
+      - /opt/blackduck/hub/tomcat
+      - /opt/blackduck/hub/hub-webapp/logs
+      - /opt/blackduck/hub/hub-webapp/conf
+      - /opt/blackduck/hub/filebeat
+      - /tmp
+  storage:
+    read_only: true
+    volumes:
+      - /opt/blackduck/hub/blackduck-storage/logs
+      - /opt/blackduck/hub/blackduck-storage/conf
+      - /opt/blackduck/hub/filebeat
+      - /tmp
+  jobrunner:
+    read_only: true
+    volumes:
+      - /opt/blackduck/hub/jobrunner/temp
+      - /opt/blackduck/hub/filebeat
+      - /opt/blackduck/hub/jobrunner/logs
+      - /opt/blackduck/hub/jobrunner/conf
+      - /tmp
+  cfssl:
+    read_only: true
+  logstash:
+    read_only: true
+    volumes:
+      - /usr/share/logstash/config
+      - /usr/share/logstash/pipeline
+      - /usr/share/logstash/data
+      - /var/log
+      - /tmp
+  registration:
+    read_only: true
+    volumes:
+      - /opt/blackduck/hub/hub-registration/logs
+      - /opt/blackduck/hub/hub-registration/conf
+      - /tmp
+  webserver:
+    read_only: true
+    volumes:
+      - /etc/nginx
+      - /var/log/nginx
+      - /var/cache/nginx
+      - /var/run
+      - /opt/blackduck/hub/webserver/filebeat
+      - /opt/blackduck/hub/webserver/logrotate
+  documentation:
+    read_only: true
+    volumes:
+      - /opt/blackduck/hub/hub-documentation/logs
+      - /opt/blackduck/hub/hub-documentation/conf
+      - /opt/blackduck/hub/filebeat
+      - /opt/blackduck/hub/tomcat
+      - /tmp
+  redis:
+    read_only: true
+    volumes:
+      - /opt/blackduck/hub/blackduck-redis/logs
+      - /opt/blackduck/hub/filebeat
+  bomengine:
+    read_only: true
+    volumes:
+      - /opt/blackduck/hub/blackduck-bomengine/logs
+      - /opt/blackduck/hub/blackduck-bomengine/conf
+      - /tmp
+  scanmatch:
+    read_only: true
+    volumes:
+      - /opt/blackduck/hub/blackduck-scanmatch/logs
+      - /opt/blackduck/hub/blackduck-scanmatch/conf
+      - /opt/blackduck/hub/filebeat
+      - /tmp
+  rabbitmq:
+    read_only: true
+    volumes:
+      - /etc/rabbitmq
+      - /var/log/rabbitmq
+      - /opt/blackduck/hub/filebeat
+      - /tmp
+      - /tmp-erlang

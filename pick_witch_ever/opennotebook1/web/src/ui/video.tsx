@@ -1,0 +1,391 @@
+// Videos of outputs (docs/video-overview-spec.md): the Studio's Video
+// overview tool, and a video's line on its output's row (making, ready to
+// watch, or failed with why). Watching is a page of its own (`watch.tsx`).
+//
+// A video overview is a one-narrator deck made for its video: the server
+// builds the deck and starts the video when it is ready, so in the list it
+// is the deck's row, with its video under it. Any finished deck or audio
+// overview can be made into a video from its row as well.
+
+import { useCallback, useEffect, useState } from "react";
+import type * as Rest from "@/client/types.gen";
+import { call, enc, errText, isAbort, storage } from "./api";
+import { overviewEstimate } from "./api-studio";
+import { EstimateBanner } from "./cost";
+import { CostDialog, LimitNote, type Estimate } from "./dialogs";
+import { Icon } from "./Icon";
+import { follow, routeUrl, type View } from "./routes";
+import "../styles/video.css";
+
+export type VideoStyle = "whiteboard" | "slides";
+/** A whiteboard's look (the server's build/whiteboard/theme.py). */
+type VideoTheme = Rest.ThemeOut;
+type VideoLength = "short" | "default" | "long";
+export type Video = Rest.VideoState;
+
+const STYLE_LABEL: Record<VideoStyle, string> = {
+  whiteboard: "Whiteboard",
+  slides: "Slides",
+};
+const STYLE_BLURB: Record<VideoStyle, string> = {
+  whiteboard: "A presenter explains while each idea is drawn as it is said.",
+  slides: "The deck's slides, each on screen while it is narrated.",
+};
+/** A theme's name, for a video's line and the watch page. */
+const THEME_LABEL: Record<string, string> = {
+  whiteboard: "Whiteboard",
+  notebook: "Notebook",
+  chalkboard: "Chalkboard",
+  blueprint: "Blueprint",
+  retro: "Retro Print",
+  papercraft: "Paper-craft",
+  watercolor: "Watercolor",
+  anime: "Anime",
+  heritage: "Heritage",
+  kawaii: "Kawaii",
+};
+
+function themeLabel(id: string | null | undefined): string | null {
+  if (!id) return null;
+  return THEME_LABEL[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
+}
+
+/** What a video is called on its row: its theme's name when it has one. */
+export function videoName(v: { style: VideoStyle; theme?: string | null }): string {
+  return `${themeLabel(v.theme) ?? STYLE_LABEL[v.style]} video`;
+}
+
+// The theme last chosen, per collection and overall, in this browser only.
+const THEME_KEY = "video-theme";
+
+function lastTheme(cid?: string): string {
+  try {
+    const s = storage();
+    return (cid && s?.getItem(`${THEME_KEY}:${cid}`)) || s?.getItem(THEME_KEY) || "whiteboard";
+  } catch {
+    return "whiteboard";
+  }
+}
+
+function rememberTheme(theme: string, cid?: string): void {
+  try {
+    const s = storage();
+    s?.setItem(THEME_KEY, theme);
+    if (cid) s?.setItem(`${THEME_KEY}:${cid}`, theme);
+  } catch {
+    // Not remembered: the next video starts from the whiteboard.
+  }
+}
+
+/** A theme's thumbnail, rendered by server/scripts/theme_previews.py. */
+function themeThumb(id: string): string {
+  return `${import.meta.env.BASE_URL}themes/${id}.jpg`;
+}
+
+const LENGTH_LABEL: Record<VideoLength, string> = {
+  short: "Shorter",
+  default: "Default",
+  long: "Longer",
+};
+
+// ── the server ───────────────────────────────────────────────────────────────
+
+async function makeOverview(
+  cid: string,
+  style: VideoStyle,
+  length: VideoLength,
+  theme?: string,
+): Promise<Rest.OverviewOut> {
+  return call<Rest.OverviewOut>("POST", `/collections/${enc(cid)}/videos`, {
+    style,
+    length,
+    ...(theme ? { theme } : {}),
+  });
+}
+
+/** The looks a whiteboard video can be made in, the default first. */
+async function videoThemes(): Promise<VideoTheme[]> {
+  return call<VideoTheme[]>("GET", "/video/themes");
+}
+
+async function videosOf(sid: string): Promise<Video[]> {
+  return call<Video[]>("GET", `/sessions/${enc(sid)}/videos`);
+}
+
+async function makeVideo(sid: string, style: VideoStyle, theme?: string): Promise<Video> {
+  return call<Video>("POST", `/sessions/${enc(sid)}/video`, { style, ...(theme ? { theme } : {}) });
+}
+
+/** Whether a video is still on its way: asked for, or being made. */
+const pending = (v: Video) => v.state === "waiting" || v.state === "rendering";
+
+// ── the Studio tool ──────────────────────────────────────────────────────────
+
+/** The Video overview tile, beside the Studio's others. */
+export function VideoTile({ on, disabled, title, onClick }: {
+  on: boolean;
+  disabled: boolean;
+  title: string;
+  onClick: () => void;
+}) {
+  return (
+    <button className={on ? "tile on" : "tile"} aria-pressed={on} disabled={disabled} title={title}
+      onClick={onClick}>
+      <span className="tile-i">
+        <Icon name="collection-play" className="lg" />
+      </span>
+      <span className="tile-n">Video overview</span>
+      <span className="tile-d">A presenter explains it, drawing as they go.</span>
+    </button>
+  );
+}
+
+/** What a video overview as chosen would cost, asked again whenever the
+ * choice changes. Null while it is asked, and when it could not be had, which
+ * `failed` says; an answer for an older choice is dropped. */
+function useOverviewEstimate(cid: string, style: VideoStyle, length: VideoLength, theme: string) {
+  const [tries, setTries] = useState(0);
+  // What was asked, as one key: an answer is shown only for the choice it
+  // was asked for, so a choice changed since reads as being asked.
+  const key = `${cid} ${style} ${length} ${style === "whiteboard" ? theme : ""} ${tries}`;
+  const [got, setGot] = useState<{ key: string; est: Estimate | null; err: string } | null>(null);
+  useEffect(() => {
+    const ask = new AbortController();
+    overviewEstimate(cid, { style, length, ...(style === "whiteboard" ? { theme } : {}) }, ask.signal)
+      .then((est) => setGot({ key, est, err: "" }))
+      .catch((e) => {
+        if (!isAbort(e)) setGot({ key, est: null, err: errText(e) });
+      });
+    return () => ask.abort();
+  }, [cid, style, length, theme, key]);
+  const now = got?.key === key ? got : null;
+  return {
+    est: now?.est ?? null,
+    loading: now === null,
+    err: now?.err ?? "",
+    retry: () => setTries((n) => n + 1),
+  };
+}
+
+/** The tool's options and its one button. The video is made in the
+ * background: its deck appears in the list at once, its video under it.
+ * What it costs is said before the click, as for every Studio tool. */
+export function VideoOptions({
+  cid,
+  onMade,
+  onCancel,
+  showCost = true,
+}: {
+  cid: string;
+  onMade: () => void;
+  onCancel: () => void;
+  /** Off in Settings, the cost is not said; over the limit still is. */
+  showCost?: boolean;
+}) {
+  const [style, setStyle] = useState<VideoStyle>("whiteboard");
+  const [length, setLength] = useState<VideoLength>("default");
+  const [theme, setTheme] = useState(() => lastTheme(cid));
+  const [themes, setThemes] = useState<VideoTheme[]>([]);
+  const [making, setMaking] = useState(false);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    let live = true;
+    videoThemes()
+      .then((t) => live && setThemes(Array.isArray(t) ? t : []))
+      // Without the list the whiteboard is made, as before themes.
+      .catch(() => live && setThemes([]));
+    return () => {
+      live = false;
+    };
+  }, []);
+  // A theme remembered that this studio no longer has is the whiteboard.
+  const chosen = themes.some((t) => t.id === theme) ? theme : "whiteboard";
+  const cost = useOverviewEstimate(cid, style, length, chosen);
+  const [costOpen, setCostOpen] = useState(false);
+  // The video as chosen would be refused for its cost.
+  const over = !!cost.est?.over_limit;
+  const make = () => {
+    if (making || over) return;
+    setMaking(true);
+    setErr("");
+    const asked = style === "whiteboard" ? chosen : undefined;
+    if (asked) rememberTheme(asked, cid);
+    makeOverview(cid, style, length, asked)
+      .then(() => onMade())
+      .catch((e) => setErr(errText(e)))
+      .finally(() => setMaking(false));
+  };
+  return (
+    <div className="opts" role="region" aria-label="Video overview options">
+      <div className="opts-h">
+        <span className="opts-t">Video overview</span>
+        <span className="opts-d">A few minutes · tens of cents</span>
+      </div>
+      <div className="opt-l">Style</div>
+      <div className="ao-formats" role="radiogroup" aria-label="Style">
+        {(["whiteboard", "slides"] as const).map((s) => (
+          <button key={s} className={style === s ? "ao-f on" : "ao-f"} role="radio"
+            aria-checked={style === s} onClick={() => setStyle(s)}>
+            <span className="ao-n">{STYLE_LABEL[s]}</span>
+            <span className="ao-d">{STYLE_BLURB[s]}</span>
+          </button>
+        ))}
+      </div>
+      {style === "whiteboard" && themes.length > 1 && (
+        <>
+          <div className="opt-l">Theme</div>
+          <div className="vt-grid" role="radiogroup" aria-label="Theme">
+            {themes.map((t) => (
+              <button key={t.id} className={chosen === t.id ? "vt on" : "vt"} role="radio"
+                aria-checked={chosen === t.id} onClick={() => setTheme(t.id)}>
+                <img src={themeThumb(t.id)} alt="" loading="lazy" width={192} height={108} />
+                <span className="vt-n">
+                  {t.label}
+                  {t.family === "illustrated" && <span className="vt-cost">+ about 30 cents</span>}
+                </span>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+      <div className="ao-len" role="radiogroup" aria-label="Length">
+        <span className="opt-l">Length</span>
+        {(["short", "default", "long"] as const).map((l) => (
+          <button key={l} className={length === l ? "chip on" : "chip"} role="radio"
+            aria-checked={length === l} onClick={() => setLength(l)}>
+            {LENGTH_LABEL[l]}
+          </button>
+        ))}
+      </div>
+      <p className="opt-hint">
+        One narrator, in the first voice of Settings › Voices. Every label on the board is checked
+        against your sources before it is drawn.
+      </p>
+      {showCost && !over && (
+        <EstimateBanner est={cost.est} loading={cost.loading} failed={cost.err !== ""} />
+      )}
+      {over && cost.est && <LimitNote e={cost.est} className="opt-err" />}
+      {err !== "" && (
+        <div className="opt-err" role="alert">
+          {err}
+        </div>
+      )}
+      <div className="opts-a">
+        <button title="Every step and what it costs, before you start" onClick={() => setCostOpen(true)}>
+          Estimate cost
+        </button>
+        <span className="grow" />
+        <button className="ghost" onClick={onCancel}>
+          Cancel
+        </button>
+        <button className="primary" disabled={making || over} onClick={make}>
+          {making ? "Starting…" : "Make video"}
+        </button>
+      </div>
+      {costOpen && (
+        <CostDialog
+          est={cost.est}
+          verb="Make"
+          loading={cost.loading}
+          err={cost.err}
+          onClose={() => setCostOpen(false)}
+          onRetry={cost.retry}
+          onBuild={() => {
+            setCostOpen(false);
+            make();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── on an output's row ───────────────────────────────────────────────────────
+
+const POLL_MS = 3000;
+
+/** An output's videos as its row shows them: how far one being made is,
+ * Watch for one that is ready, why one failed, and Make video for a
+ * finished output that has none. Asks again every few seconds while one is
+ * on its way. */
+export function VideoLine({ sid, ready, ro }: { sid: string; ready: boolean; ro: boolean }) {
+  const [videos, setVideos] = useState<Video[] | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [err, setErr] = useState("");
+  const load = useCallback(() => {
+    videosOf(sid)
+      .then(setVideos)
+      .catch(() => setVideos((v) => v ?? []));
+  }, [sid]);
+  useEffect(() => {
+    load();
+  }, [load, ready]);
+  const live = (videos ?? []).some(pending);
+  useEffect(() => {
+    if (!live) return;
+    const t = setInterval(load, POLL_MS);
+    return () => clearInterval(t);
+  }, [live, load]);
+
+  if (videos === null) return null;
+  const asked = videos.filter((v) => v.state !== "none");
+  const start = () => {
+    if (starting) return;
+    setStarting(true);
+    setErr("");
+    makeVideo(sid, "whiteboard", lastTheme())
+      .then(load)
+      .catch((e) => setErr(errText(e)))
+      .finally(() => setStarting(false));
+  };
+  if (asked.length === 0) {
+    if (!ready || ro) return null;
+    return (
+      <div className="out-video">
+        <button className="link-btn" disabled={starting} onClick={start}>
+          <Icon name="collection-play" />
+          {starting ? "Starting…" : "Make a video of this"}
+        </button>
+        {err !== "" && <span className="out-d bad">{err}</span>}
+      </div>
+    );
+  }
+  return (
+    <>
+      {asked.map((v) => (
+        <div key={v.style} className="out-video">
+          <Icon name="collection-play" />
+          <span className="out-d num">
+            {videoName(v)}
+            {v.state === "waiting" && (v.waiting ? ` · ${v.waiting}` : " · starts when the deck is made")}
+            {v.state === "rendering" && " · being made…"}
+            {v.state === "ready" && (v.duration_ms ?? 0) > 0 && ` · ${Math.round((v.duration_ms ?? 0) / 1000)} s`}
+            {v.state === "ready" && (v.claims ?? 0) > 0 && ` · ${v.supported ?? 0}/${v.claims} claims checked`}
+          </span>
+          {v.state === "failed" && <span className="out-d bad">{v.failure}</span>}
+          {v.playable && <WatchLink sid={sid} style={v.style} />}
+          {v.state === "failed" && !ro && ready && (
+            <button className="link-btn" disabled={starting} onClick={start}>
+              <Icon name="arrow-clockwise" />
+              Try again
+            </button>
+          )}
+        </div>
+      ))}
+      {err !== "" && <div className="out-video out-d bad">{err}</div>}
+    </>
+  );
+}
+
+// ── watching ─────────────────────────────────────────────────────────────────
+
+/** Watch: the video's own page, with the tutor beside it. */
+function WatchLink({ sid, style }: { sid: string; style: VideoStyle }) {
+  const view: View = { kind: "watch", sid, style, share: null };
+  return (
+    <a className="link-btn" href={routeUrl(view)} onClick={(e) => follow(e, view)}>
+      <Icon name="play-fill" />
+      Watch
+    </a>
+  );
+}

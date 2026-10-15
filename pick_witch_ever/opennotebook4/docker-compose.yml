@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  opennotebooklm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: opennotebooklm:latest
+    container_name: opennotebooklm
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - HOST=0.0.0.0
+      - PORT=3000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

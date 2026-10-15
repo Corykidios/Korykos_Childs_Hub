@@ -1,0 +1,52 @@
+version: '3.6'
+services:
+  cfssl:
+    image: blackducksoftware/blackduck-cfssl:1.0.38
+    volumes:
+      - cert-volume:/etc/cfssl
+    healthcheck:
+      test: [ "CMD", "/usr/local/bin/docker-healthcheck.sh", "http://localhost:8888/api/v1/cfssl/scaninfo" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    user: 'cfssl:root'
+
+  postgres:
+    image: blackducksoftware/blackduck-postgres:16-2.10
+    volumes:
+      - postgres96-data-volume:/var/lib/postgresql/data
+      - storage-volume:/tmp/uploads
+    env_file: [blackduck-config.env]
+    environment:
+      BLACKDUCK_FILEBEAT_ENABLE: "false"
+    healthcheck:
+      test: [ "CMD", "/usr/local/bin/docker-healthcheck.sh" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    user: '1001:root'
+    stop_grace_period: 60s
+    deploy:
+      restart_policy:
+        condition: on-failure
+        
+  postgres-upgrader:
+    image: blackducksoftware/blackduck-postgres-upgrader:16-1.5
+    volumes:
+      - postgres96-data-volume:/var/lib/postgresql/data
+    env_file: [blackduck-config.env]
+    healthcheck:
+      test: [ "CMD", "/usr/local/bin/docker-healthcheck.sh" ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    user: 'root:root'
+    deploy:
+      restart_policy:
+        condition: none
+
+volumes:
+  cert-volume:
+  postgres96-data-volume:
+  log-volume:
+  storage-volume:

@@ -1,0 +1,3 @@
+# Non-test Go files over 800 lines that are allowed for now (scripts/check-filesize.sh).
+# Format: <path> <max-lines> <reason>. <max-lines> is the file's length when it was waived.
+# A waived file may not grow past it, and one that shrinks under the limit fails until its line is removed.

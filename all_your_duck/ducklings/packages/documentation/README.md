@@ -1,0 +1,110 @@
+![ducklings logo](assets/logo.png)
+
+A minimal DuckDB WASM binding for browsers and Cloudflare Workers.
+
+## Packages
+
+| Package | Environment | API Style |
+|---------|-------------|-----------|
+| [@ducklings/browser](https://www.npmjs.com/package/@ducklings/browser) | Browsers | Asynchronous (Web Worker) |
+| [@ducklings/workers](https://www.npmjs.com/package/@ducklings/workers) | Cloudflare Workers with httpfs and Parquet* | Asynchronous (Asyncify) |
+| [@ducklings/workers-iceberg](https://www.npmjs.com/package/@ducklings/workers-iceberg) | Cloudflare Workers with httpfs, Parquet, Avro, and Iceberg* | Asynchronous (Asyncify) |
+| [@ducklings/workers-ducklake](https://www.npmjs.com/package/@ducklings/workers-ducklake) | Cloudflare Workers with DuckLake* | Asynchronous (Asyncify) |
+
+All packages provide the same async API, but use different mechanisms and bundled extensions under the hood.
+
+> *Cloudflare allows [64 MiB uncompressed per Worker on both Free and Paid plans](https://developers.cloudflare.com/workers/platform/limits/#worker-size), with no compressed-size limit. Use `wrangler deploy --dry-run --outdir bundled` and check `Total Upload`. Choose a plan based on CPU and other runtime requirements.
+
+## Quick Start
+
+### Installation
+
+```bash
+# For browsers
+npm install @ducklings/browser
+
+# For Cloudflare Workers
+npm install @ducklings/workers
+
+# For the explicit Iceberg package
+npm install @ducklings/workers-iceberg
+
+# For Cloudflare Workers with DuckLake
+npm install @ducklings/workers-ducklake
+```
+
+### Browser Usage
+
+```typescript
+import { init, DuckDB } from '@ducklings/browser';
+
+// Initialize the WASM module (runs in Web Worker)
+await init();
+
+// Create database and connection
+const db = new DuckDB();
+const conn = await db.connect();
+
+// Execute queries (async)
+const rows = await conn.query('SELECT 42 as answer');
+console.log(rows); // [{ answer: 42 }]
+
+// Clean up
+await conn.close();
+await db.close();
+```
+
+### Cloudflare Workers Usage
+
+```typescript
+import { init, DuckDB } from '@ducklings/workers';
+import wasmModule from '@ducklings/workers/wasm';
+
+// Initialize with pre-compiled WASM module
+await init({ wasmModule });
+
+// Create database and connection
+const db = new DuckDB();
+const conn = db.connect();
+
+// Execute queries (async)
+const rows = await conn.query('SELECT 42 as answer');
+console.log(rows); // [{ answer: 42 }]
+
+// Clean up
+conn.close();
+db.close();
+```
+
+## Shared Async API
+
+Both packages expose the same async API:
+
+```typescript
+// Works in both packages
+const rows = await conn.query('SELECT * FROM range(10)');
+const table = await conn.queryArrow('SELECT * FROM range(10)');
+const affected = await conn.execute('INSERT INTO t VALUES (1)');
+const results = await stmt.run();
+```
+
+## Features
+
+- **Minimal footprint**: Optimized WASM builds; size depends on the bundled extensions
+- **TypeScript**: Full type definitions included
+- **Prepared statements**: Secure parameterized queries
+- **Streaming results**: Memory-efficient chunked processing
+- **Transactions**: BEGIN/COMMIT/ROLLBACK support
+- **Arrow support**: Query results as Arrow Tables via Flechette
+- **Parquet/httpfs**: Built-in file format and remote file support
+- **JSON**: Not bundled in the standard packages; use a custom build if you need DuckDB's `json` extension
+- **httpfs**: Load remote files via HTTP/HTTPS
+- **File registration**: Register URLs, buffers, and text as virtual files
+
+## Links
+
+- [GitHub Repository](https://github.com/tobilg/ducklings)
+- [@ducklings/browser on npm](https://www.npmjs.com/package/@ducklings/browser)
+- [@ducklings/workers on npm](https://www.npmjs.com/package/@ducklings/workers)
+- [@ducklings/workers-iceberg on npm](https://www.npmjs.com/package/@ducklings/workers-iceberg)
+- [@ducklings/workers-ducklake on npm](https://www.npmjs.com/package/@ducklings/workers-ducklake)

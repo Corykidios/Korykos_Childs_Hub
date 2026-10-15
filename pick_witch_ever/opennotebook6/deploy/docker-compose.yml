@@ -1,0 +1,5 @@
+# Compatibility entry point. Keep one production model: Compose resolves all
+# builds, health checks, security defaults, and named volumes from the root file.
+include:
+  - path: ../docker-compose.yml
+    project_directory: ..

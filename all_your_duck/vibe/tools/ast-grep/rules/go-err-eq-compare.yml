@@ -1,0 +1,31 @@
+id: go-err-eq-compare
+language: go
+severity: error
+message: error compared with ==/!= (or switched on) against a sentinel; a wrapped error slips through. Use errors.Is.
+note: Matches by the sentinel side (ErrX, pkg.ErrX, io.EOF, context.Canceled/DeadlineExceeded), whatever the error variable is called.
+rule:
+  all:
+    - not:
+        # Is(target) methods define sentinel identity, so == is correct there (exempt by name).
+        inside:
+          stopBy: end
+          kind: method_declaration
+          has: {field: name, regex: '^Is$'}
+    - any:
+        - kind: binary_expression
+          has: {field: operator, regex: '^(==|!=)$'}
+          any:
+            - has: {field: right, kind: identifier, regex: '^Err[A-Z]'}
+            - has: {field: left, kind: identifier, regex: '^Err[A-Z]'}
+            - has: {field: right, kind: selector_expression, regex: '\.(EOF|ErrUnexpectedEOF|Err[A-Z][A-Za-z]*|DeadlineExceeded|Canceled)$'}
+            - has: {field: left, kind: selector_expression, regex: '\.(EOF|ErrUnexpectedEOF|Err[A-Z][A-Za-z]*|DeadlineExceeded|Canceled)$'}
+        # switch err { case io.EOF: ... }
+        - kind: expression_case
+          inside: {kind: expression_switch_statement}
+          has:
+            field: value
+            has:
+              any:
+                - {kind: identifier, regex: '^Err[A-Z]'}
+                - {kind: selector_expression, regex: '\.(EOF|ErrUnexpectedEOF|Err[A-Z][A-Za-z]*|DeadlineExceeded|Canceled)$'}
+ignores: ["**/*_test.go"]

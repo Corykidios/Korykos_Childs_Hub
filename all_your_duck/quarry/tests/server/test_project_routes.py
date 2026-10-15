@@ -1,0 +1,123 @@
+from pathlib import Path
+
+from quarry.agent.fake import FakeProvider
+from tests.projects.test_export import project_with_saved_items, save_another_dataset
+from tests.server.test_app import PRICES, TIDY, end, make_client, py, view_turn, wait_idle
+from tests.server.test_recall import saved_project
+
+
+def test_project_crud_and_save_flow(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        [py("c1", PRICES), view_turn("c2", datasets=["prices"]), end(), end(TIDY)]
+    )
+    client = make_client(tmp_path, [], provider_factory=lambda _cfg: provider)
+    created = client.post("/projects", json={"name": "Momentum", "description": "d"})
+    assert created.status_code == 201 and created.json()["slug"] == "momentum"
+    assert [p["slug"] for p in client.get("/projects").json()] == ["momentum"]
+    assert client.get("/projects/nope").status_code == 404
+
+    sid = client.post("/sessions", json={}).json()["id"]
+    step_id = client.post(f"/sessions/{sid}/steps", json={"prompt": "load"}).json()["id"]
+    wait_idle(client, sid)
+    body = {"session_id": sid, "step_id": step_id, "name": "table", "mode": "live"}
+    saved = client.post("/projects/momentum/views", json=body)
+    assert saved.status_code == 200 and saved.json()["datasets"] == ["prices"]
+    project = client.get("/projects/momentum").json()
+    assert project["datasets"][0]["validated"] is True
+    assert project["views"][0]["name"] == "table"
+
+    bad = client.post("/projects/momentum/views", json={**body, "name": "Bad Name"})
+    assert bad.status_code == 400
+    missing = client.post(
+        "/projects/momentum/datasets", json={"session_id": sid, "dataset": "nope", "mode": "live"}
+    )
+    assert missing.status_code == 404
+
+    cards = [{"view": "table", "x": 0, "y": 0, "w": 6, "h": 8}]
+    assert client.put("/projects/momentum/canvas", json=cards).json()["canvas"] == cards
+    view = client.get("/projects/momentum/views/table").json()
+    assert view["meta"]["name"] == "table" and "export default" in view["source"]
+    assert view["state"] == {} and view["queries"] == []
+    assert client.get("/projects/momentum/views/nope").status_code == 404
+
+
+def test_save_while_running_is_409(tmp_path: Path) -> None:
+    provider = FakeProvider([py("c1", "import time; time.sleep(3)"), end()])
+    client = make_client(tmp_path, [], provider_factory=lambda _cfg: provider)
+    client.post("/projects", json={"name": "p"})
+    sid = client.post("/sessions", json={}).json()["id"]
+    client.post(f"/sessions/{sid}/steps", json={"prompt": "slow"})
+    body = {"session_id": sid, "dataset": "x", "mode": "live"}
+    assert client.post("/projects/p/datasets", json=body).status_code == 409
+    client.post(f"/sessions/{sid}/interrupt")
+    wait_idle(client, sid)
+
+
+def test_canvas_rejects_a_view_twice(tmp_path: Path) -> None:
+    client = make_client(tmp_path, [])
+    client.post("/projects", json={"name": "p"})
+    card = {"view": "table", "x": 0, "y": 0, "w": 6, "h": 8}
+    assert client.put("/projects/p/canvas", json=[card, {**card, "y": 8}]).status_code == 400
+    assert client.get("/projects/p").json()["meta"]["canvas"] == []
+
+
+def test_export_routes(tmp_path: Path) -> None:
+    client, _ = saved_project(tmp_path, "live")
+    nb = client.get("/projects/p/export.ipynb")
+    assert nb.status_code == 200
+    assert nb.headers["content-disposition"] == (
+        "attachment; filename=\"p.ipynb\"; filename*=UTF-8''p.ipynb"
+    )
+    assert nb.json()["nbformat"] == 4 and any(c["cell_type"] == "code" for c in nb.json()["cells"])
+    script = client.get("/projects/p/datasets/prices/recipe.py")
+    assert script.status_code == 200 and script.headers["content-type"].startswith("text/x-python")
+    assert script.headers["content-disposition"] == (
+        "attachment; filename=\"prices.py\"; filename*=UTF-8''prices.py"
+    )
+    assert "prices = " in script.text
+    assert client.get("/projects/p/datasets/nope/recipe.py").status_code == 404
+    assert client.get("/projects/nope/export.ipynb").status_code == 404
+    assert client.get("/projects/nope/datasets/prices/recipe.py").status_code == 404
+
+
+def test_a_non_ascii_dataset_name_downloads_under_both_filename_forms(tmp_path: Path) -> None:
+    save_another_dataset(project_with_saved_items(tmp_path), "数据", "数据 = 1\n")
+    script = make_client(tmp_path, []).get("/projects/momentum/datasets/数据/recipe.py")
+    assert script.status_code == 200 and script.text.endswith("数据 = 1\n")
+    assert script.headers["content-disposition"] == (
+        "attachment; filename=\"__.py\"; filename*=UTF-8''%E6%95%B0%E6%8D%AE.py"
+    )
+
+
+def test_html_report_download_requires_auth_and_uses_saved_artifacts(tmp_path: Path) -> None:
+    project_with_saved_items(tmp_path)
+    client = make_client(tmp_path, [])
+    assert (
+        client.get("/projects/momentum/export.html", headers={"Authorization": ""}).status_code
+        == 401
+    )
+    report = client.get("/projects/momentum/export.html")
+    assert report.status_code == 200
+    assert report.headers["content-type"].startswith("text/html")
+    assert report.headers["content-disposition"] == (
+        "attachment; filename=\"momentum.html\"; filename*=UTF-8''momentum.html"
+    )
+    assert "Live results unavailable" in report.text
+    assert "View results unavailable" in report.text
+    assert client.get("/projects/nope/export.html").status_code == 404
+
+
+def test_html_report_artifact_failure_is_an_explicit_error(tmp_path: Path) -> None:
+    project_with_saved_items(tmp_path)
+    (tmp_path / "projects/momentum/views/table/state.json").write_text("corrupt")
+    report = make_client(tmp_path, []).get("/projects/momentum/export.html")
+    assert report.status_code == 400
+    assert "saved artifact" in report.json()["detail"]
+
+
+def test_html_report_rejects_a_missing_view_dependency(tmp_path: Path) -> None:
+    project_with_saved_items(tmp_path)
+    (tmp_path / "projects/momentum/datasets/prices/meta.json").unlink()
+    report = make_client(tmp_path, []).get("/projects/momentum/export.html")
+    assert report.status_code == 400
+    assert "prices" in report.json()["detail"] and "table" in report.json()["detail"]

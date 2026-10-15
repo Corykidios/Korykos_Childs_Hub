@@ -1,0 +1,33 @@
+DuckDuckGoose
+Copyright 2026 KandiVault LLC
+
+Licensed under the Apache License, Version 2.0. See the LICENSE file for the
+full terms.
+
+
+ATTRIBUTIONS
+
+OASIS (https://github.com/camel-ai/oasis)
+    The social simulation engine DuckDuckGoose runs on, from CAMEL-AI, used
+    unmodified as a dependency (camel-oasis 0.2.5 / camel-ai 0.2.78) and
+    licensed under Apache License 2.0. OASIS provides the simulated platforms,
+    the agent environment, and the round loop. DuckDuckGoose supplies the
+    corpus ingestion, entity graph, population builder, agent tiering,
+    compiled policies, metrics, reporting, and interface around it.
+
+MiroFish (https://github.com/666ghj/MiroFish)
+    The project that prompted this one. MiroFish is an independent wrapper
+    around the same OASIS engine, licensed under AGPL-3.0. DuckDuckGoose began
+    as an effort to build an English-language tool with a different interface
+    and a different approach to agent tiering and corpus grounding.
+
+    DuckDuckGoose is a separate implementation and contains no MiroFish source
+    code. An earlier development revision of this repository did carry ported
+    code in its ChromaDB memory layer; those five modules and their tests were
+    rewritten from scratch in August 2026 so that no part of this project is
+    derived from AGPL-3.0 licensed work. Credit for the original idea of
+    wrapping OASIS this way belongs to its author.
+
+
+Other dependencies retain their own licenses. See backend/pyproject.toml and
+frontend/package.json for the full list.

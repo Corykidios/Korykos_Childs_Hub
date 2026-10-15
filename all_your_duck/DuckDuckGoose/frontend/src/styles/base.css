@@ -1,0 +1,187 @@
+/*
+ * Base sheet: reset + the operator style rules as utility classes.
+ *
+ * Fonts: Fira Code / Syne are referenced via the token fallback stacks only
+ * (ui-monospace / Cascadia / Consolas and system-ui pick up the slack when
+ * they are not installed). Self-hosting the two families under
+ * public/fonts/ + @font-face is a later nicety — no CDN dependency.
+ */
+
+:root {
+  /* Extension token (tokens.css is verbatim-locked): full-round radius for dots. */
+  --radius-full: 999px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  min-height: 100%;
+  position: relative;
+}
+
+/* Scanline overlay — the signature. Pure chrome; never intercepts input. */
+#app::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.5) 0px,
+    rgba(255, 255, 255, 0.5) 1px,
+    transparent 1px,
+    transparent 2px
+  );
+  opacity: 0.012;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+  transition: color 200ms ease-out;
+}
+
+a:hover {
+  color: var(--text);
+}
+
+/* --- Micro-labels: section headers, table headers, stepper steps --- */
+.micro-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--text-muted);
+}
+
+/* --- Panels: surface + border, NO shadows (shadows only on modals/dropdowns) --- */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+}
+
+/* --- Buttons: bordered, no fill --- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  background: transparent;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 200ms ease-out, border-color 200ms ease-out,
+    background-color 200ms ease-out;
+}
+
+.btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--text-muted);
+}
+
+.btn:disabled {
+  color: var(--text-dim);
+  border-color: var(--border);
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn-danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: rgba(251, 113, 133, 0.1);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* --- Dashed hairline separators: sections ruled, not boxed --- */
+.rule {
+  border: none;
+  border-top: 1px dashed rgba(53, 90, 102, 0.5);
+  margin: 16px 0;
+}
+
+/* --- Status dots: state lives in colored text/dots, never tinted washes --- */
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: currentColor;
+  box-shadow: 0 0 5px currentColor;
+}
+
+/* --- Display face: ONLY big numerics and the wordmark --- */
+.wordmark {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+}
+
+.big-num {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Form controls, kept on-theme --- */
+input,
+select,
+textarea {
+  background: var(--surface-2);
+  border: 1px solid var(--border-mid);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 6px 10px;
+  transition: border-color 200ms ease-out;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent-dim);
+}

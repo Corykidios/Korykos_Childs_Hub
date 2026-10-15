@@ -1,0 +1,186 @@
+/* The watch page of a video (ui/watch.tsx and ui/watch/): the video leads on
+   a backdrop with its controls under it, and the rail beside it is the
+   tutor, the transcript and the chapters. One viewport tall on a desktop; on
+   a phone the video comes first and the rail follows. Every rule is scoped
+   to .watch-page, and the colours are the studio's tokens. */
+body.watch-open { overflow:hidden; }
+.watch-page {
+  --line:var(--bs-border-color-translucent); --panel:var(--bs-tertiary-bg); --raise:var(--bs-secondary-bg);
+  --soft:var(--st-hover-bg); --dim:var(--bs-secondary-color); --em:var(--bs-emphasis-color);
+  --accent:var(--bs-primary); --link:var(--bs-primary-text-emphasis);
+  display:grid; grid-template-columns:minmax(0,1fr) 400px; grid-template-rows:auto minmax(0,1fr);
+  height:100vh; height:100dvh; background:var(--bs-body-bg); color:var(--bs-body-color);
+}
+.watch-page * { box-sizing:border-box; }
+.watch-page .grow { flex:1; }
+.watch-page button:focus-visible { outline:2px solid var(--st-focus); outline-offset:2px; }
+
+/* ── top bar ─────────────────────────────────────────────────────────────── */
+.watch-page .w-top { grid-column:1 / -1; display:flex; align-items:center; gap:12px; padding:8px 16px;
+  min-height:56px; border-bottom:1px solid var(--line); background:var(--panel); }
+.watch-page .w-back, .watch-page .w-icon { display:grid; place-items:center; width:36px; height:36px; padding:0;
+  border-radius:var(--bs-border-radius); background:transparent; border:0; color:var(--dim); }
+.watch-page .w-back:hover, .watch-page .w-icon:hover { background:var(--soft); color:var(--em); }
+.watch-page .w-titles { flex:1; min-width:0; }
+.watch-page .w-title { font-weight:650; font-size:16px; color:var(--em); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.watch-page .w-sub { font-size:12.5px; color:var(--dim); }
+
+/* ── the video ───────────────────────────────────────────────────────────── */
+.watch-page .w-left { display:flex; flex-direction:column; gap:12px; min-width:0; min-height:0;
+  padding:16px 18px 14px; background:var(--st-backdrop); margin:0; max-width:none; width:auto; }
+.watch-page .w-stage { flex:1; min-height:0; display:flex; align-items:center; justify-content:center; }
+.watch-page .w-err { color:var(--bs-danger-text-emphasis); font-size:13px; }
+
+/* The frame around the video: what goes full screen, with the captions. */
+.watch-page .w-frame { position:relative; width:100%; max-height:100%; aspect-ratio:16 / 9;
+  border-radius:var(--bs-border-radius-lg); overflow:hidden; box-shadow:var(--bs-box-shadow-lg); background:#000; }
+.watch-page .w-frame:fullscreen { border-radius:0; }
+.watch-page .w-video { position:absolute; inset:0; width:100%; height:100%; background:#000; cursor:pointer; }
+
+/* Before it starts: one big play button over the video, as a poster has. */
+.watch-page .w-start-layer { position:absolute; inset:0; display:grid; place-items:center; z-index:3;
+  pointer-events:none; }
+.watch-page .w-start { pointer-events:auto; width:76px; height:76px;
+  display:grid; place-items:center; padding:0 0 0 4px; border:0; border-radius:50%; background:var(--accent);
+  color:var(--st-on-primary, #fff); font-size:34px; box-shadow:0 8px 28px rgba(0,0,0,.35); }
+.watch-page .w-start:hover { filter:brightness(1.08); }
+
+/* Captions over the video, as the slides' player draws them (player.css,
+   "#cap"): a phrase at a time, the words said so far bright, the word being
+   said marked, the rest dim. */
+.watch-page .w-cap { position:absolute; left:50%; bottom:18px; transform:translateX(-50%);
+  max-width:min(78%, 900px); padding:7px 14px; border-radius:var(--bs-border-radius);
+  background:rgba(0,0,0,.78); color:rgba(255,255,255,.62); font-size:clamp(13px,1.35vw,18px);
+  line-height:1.45; text-align:center; font-family:var(--bs-font-sans-serif); pointer-events:none; z-index:2; }
+.watch-page .w-cap span { padding:0 2px; margin:0 1px; border-radius:3px; transition:color .1s, background .1s; }
+.watch-page .w-cap .past { color:#fff; }
+.watch-page .w-cap .now { color:#111827; background:#facc15; }
+
+/* ── the controls ────────────────────────────────────────────────────────────
+   As the slides' player has them (player.css, "controls"): the chapters as
+   one track cut into segments, sized by their length, filling as they play;
+   then the buttons and the clock. */
+.watch-page .w-controls { display:flex; flex-direction:column; gap:6px; }
+.watch-page .w-track { display:flex; gap:3px; height:18px; align-items:center; }
+.watch-page .w-seg { position:relative; flex:1 1 0; min-width:6px; height:5px; padding:0; margin:0; border:0;
+  border-radius:3px; background:var(--st-pressed-bg, var(--bs-border-color)); overflow:visible; cursor:pointer;
+  transition:height .12s; }
+.watch-page .w-track:hover .w-seg { height:8px; }
+.watch-page .w-seg-fill { position:absolute; inset:0 auto 0 0; border-radius:3px; background:var(--accent); }
+.watch-page .w-seg.on .w-seg-fill { background:var(--link); }
+.watch-page .w-seg-tip { position:absolute; bottom:calc(100% + 10px); left:50%; transform:translateX(-50%);
+  width:max-content; max-width:280px; padding:5px 9px; border-radius:var(--bs-border-radius);
+  background:rgba(17,24,39,.94); color:#fff; font-size:12.5px; line-height:1.35; text-align:left; white-space:normal;
+  pointer-events:none; opacity:0; transition:opacity .12s; z-index:5; }
+.watch-page .w-seg-tip b { font-variant-numeric:tabular-nums; color:#93c5fd; margin-right:4px; }
+.watch-page .w-seg:hover .w-seg-tip, .watch-page .w-seg:focus-visible .w-seg-tip { opacity:1; }
+.watch-page .w-seg:first-child .w-seg-tip { left:0; transform:none; }
+.watch-page .w-seg:last-child .w-seg-tip { left:auto; right:0; transform:none; }
+.watch-page .w-ctl-row { display:flex; align-items:center; gap:6px; min-width:0; }
+.watch-page .w-btn { width:38px; height:38px; padding:0; display:inline-grid; place-items:center; flex:0 0 auto;
+  background:transparent; border:1px solid transparent; color:var(--bs-body-color); font-size:18px; border-radius:50%; }
+.watch-page .w-btn:hover:not(:disabled) { background:var(--raise); }
+.watch-page .w-btn:disabled { opacity:.4; cursor:default; }
+.watch-page .w-btn.on { color:var(--link); }
+.watch-page .w-play { width:44px; height:44px; font-size:22px; background:var(--em); color:var(--bs-body-bg); }
+.watch-page .w-play:hover:not(:disabled) { background:var(--em); opacity:.88; }
+.watch-page .w-clock { font-variant-numeric:tabular-nums; color:var(--dim); font-size:13px; margin-left:6px; white-space:nowrap; }
+.watch-page .w-chap-now { flex:1; min-width:0; text-align:center; font-size:13px; color:var(--dim);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.watch-page .w-chap-now b { color:var(--bs-body-color); font-weight:600; }
+.watch-page .w-speed { min-width:46px; height:32px; padding:0 8px; border-radius:var(--bs-border-radius);
+  border:1px solid var(--bs-border-color); background:var(--raise); color:var(--bs-body-color);
+  font-size:13px; font-weight:650; font-variant-numeric:tabular-nums; }
+
+/* ── the rail: its tabs, the transcript and the chapters ─────────────────── */
+.watch-page .w-rail { display:flex; flex-direction:column; min-height:0; background:var(--panel);
+  border-left:1px solid var(--line); }
+.watch-page .w-tabs { display:flex; gap:2px; padding:8px 10px 0; border-bottom:1px solid var(--line); }
+.watch-page .w-tab { display:inline-flex; align-items:center; gap:7px; padding:9px 12px; background:transparent;
+  border:0; border-bottom:2px solid transparent; border-radius:0; color:var(--dim); font-weight:600; font-size:13.5px; }
+.watch-page .w-tab:hover { color:var(--bs-body-color); }
+.watch-page .w-tab.on { color:var(--em); border-bottom-color:var(--link); }
+
+.watch-page .w-pane { position:relative; flex:1; min-height:0; display:flex; flex-direction:column; }
+.watch-page .w-lines { flex:1; min-height:0; overflow-y:auto; padding:10px; display:flex; flex-direction:column; gap:2px; }
+.watch-page :is(.w-line, .w-chap, .w-scene) { display:flex; gap:10px; width:100%; text-align:left; padding:7px 10px;
+  border:0; border-radius:var(--bs-border-radius); background:transparent; color:inherit; font:inherit;
+  line-height:1.5; cursor:pointer; justify-content:flex-start; align-items:flex-start; height:auto;
+  white-space:normal; font-weight:inherit; }
+.watch-page :is(.w-line, .w-chap, .w-scene):hover { background:var(--soft); }
+.watch-page .w-line.seen { color:var(--dim); }
+.watch-page :is(.w-line, .w-chap, .w-scene).on { background:var(--bs-primary-bg-subtle); color:var(--em); }
+.watch-page .w-line-t { flex:0 0 auto; min-width:38px; font-size:12px; color:var(--link);
+  font-variant-numeric:tabular-nums; padding-top:2px; }
+.watch-page .w-chap { font-weight:650; margin-top:6px; }
+.watch-page .w-scene { padding-left:22px; font-size:13.5px; }
+.watch-page .w-scene > span:last-child { display:flex; flex-direction:column; }
+.watch-page .w-scene-l { font-size:12px; color:var(--dim); }
+.watch-page .w-none { color:var(--dim); padding:10px; }
+.watch-page .w-follow { position:absolute; left:50%; bottom:12px; transform:translateX(-50%);
+  display:inline-flex; align-items:center; gap:6px; padding:6px 14px; border-radius:var(--bs-border-radius-pill);
+  background:var(--accent); color:var(--st-on-primary); border:0; box-shadow:var(--bs-box-shadow); font-size:13px; }
+/* Pressed, it keeps its centring: the app scales a pressed button by a
+   transform, which would otherwise drop the one that centres it. */
+.watch-page .w-follow:active:not(:disabled) { transform:translateX(-50%) scale(.98); }
+
+/* ── the tutor ───────────────────────────────────────────────────────────── */
+.watch-page .w-explain { flex:1; min-height:0; display:flex; flex-direction:column; }
+.watch-page .w-log { flex:1; min-height:0; overflow-y:auto; padding:14px 12px; display:flex; flex-direction:column; gap:10px; }
+.watch-page .w-hello { margin:auto 8px; text-align:center; color:var(--dim); font-size:14px; }
+.watch-page .w-hello .ic { font-size:22px; color:var(--accent); }
+.watch-page .w-msg { padding:9px 12px; border-radius:var(--bs-border-radius-lg); font-size:14px; line-height:1.55;
+  overflow-wrap:anywhere; }
+.watch-page .w-msg.you { align-self:flex-end; max-width:88%; background:var(--bs-primary-bg-subtle);
+  border:1px solid var(--bs-primary-border-subtle); display:flex; flex-direction:column; gap:3px; }
+.watch-page .w-msg.tutor { background:var(--raise); border:1px solid var(--bs-border-color); }
+.watch-page .w-msg.err { background:var(--bs-danger-bg-subtle); border-color:var(--bs-danger); color:var(--bs-danger-text-emphasis); }
+.watch-page .w-msg .md p { margin:0 0 .5em; }
+.watch-page .w-msg .md p:last-child { margin-bottom:0; }
+.watch-page .moment { display:inline; padding:0 5px; margin:0 1px; border:0; border-radius:var(--bs-border-radius-sm);
+  background:var(--bs-primary-bg-subtle); color:var(--link); font:inherit; font-size:.9em; font-weight:600;
+  font-variant-numeric:tabular-nums; cursor:pointer; }
+.watch-page .moment:hover { background:var(--bs-primary-border-subtle); }
+.watch-page .moment.at { align-self:flex-end; font-size:11.5px; }
+.watch-page .w-typing { display:inline-flex; gap:4px; }
+.watch-page .w-typing i { width:6px; height:6px; border-radius:50%; background:var(--dim); animation:w-dot 1.2s infinite; }
+.watch-page .w-typing i:nth-child(2) { animation-delay:.15s; }
+.watch-page .w-typing i:nth-child(3) { animation-delay:.3s; }
+@keyframes w-dot { 0%, 80%, 100% { opacity:.3 } 40% { opacity:1 } }
+
+.watch-page .w-ask { border-top:1px solid var(--line); padding:10px 12px 12px; display:flex; flex-direction:column; gap:8px; }
+.watch-page .w-now { display:flex; align-items:center; gap:8px; min-height:28px; }
+.watch-page .w-now-chip { font-size:12.5px; font-weight:600; color:var(--link); padding:3px 10px;
+  border-radius:var(--bs-border-radius-pill); background:var(--bs-primary-bg-subtle); overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap; min-width:0; font-variant-numeric:tabular-nums; }
+.watch-page .w-now-where { font-weight:500; }
+.watch-page :is(.w-resume, .w-clear) { display:inline-flex; align-items:center; gap:5px; padding:3px 10px; font-size:12.5px;
+  border-radius:var(--bs-border-radius-pill); border:1px solid var(--bs-border-color); background:var(--raise); color:inherit; }
+.watch-page .w-resume { border-color:var(--accent); color:var(--link); }
+.watch-page .w-clear { border-color:transparent; background:transparent; color:var(--dim); }
+.watch-page .w-quick { display:flex; flex-wrap:wrap; gap:6px; }
+.watch-page .w-q { padding:5px 11px; font-size:12.5px; border-radius:var(--bs-border-radius-pill);
+  border:1px solid var(--bs-border-color); background:var(--bs-body-bg); color:inherit; }
+.watch-page .w-q:hover:not(:disabled) { background:var(--soft); }
+.watch-page .w-q:disabled, .watch-page .w-send:disabled { opacity:.45; cursor:default; }
+.watch-page .w-composer { display:flex; align-items:flex-end; gap:8px; }
+.watch-page .w-composer textarea { flex:1; resize:none; min-height:40px; max-height:120px; padding:9px 12px;
+  border-radius:var(--bs-border-radius-lg); border:1px solid var(--bs-border-color); background:var(--bs-body-bg);
+  color:inherit; font:inherit; font-size:14px; field-sizing:content; }
+.watch-page .w-composer textarea:focus { outline:2px solid var(--st-focus); outline-offset:0; }
+.watch-page .w-send { display:grid; place-items:center; width:40px; height:40px; padding:0; border:0;
+  border-radius:var(--bs-border-radius-lg); background:var(--accent); color:var(--st-on-primary); }
+
+@media (prefers-reduced-motion: reduce) {
+  .watch-page .w-cap span, .watch-page .w-seg, .watch-page .w-seg-tip { transition:none; }
+  .watch-page .w-typing i { animation:none; }
+}
+/* A phone: the video first, the rail under it, the page scrolls. */
+@media (max-width:900px) {
+  body.watch-open { overflow:auto; }
+  .watch-page { grid-template-columns:minmax(0,1fr); grid-template-rows:auto auto minmax(480px,1fr); height:auto; min-height:100dvh; }
+  .watch-page .w-left { padding:0 0 10px; }
+  .watch-page .w-controls { padding:0 16px; }
+  .watch-page .w-chap-now { display:none; }
+  .watch-page .w-rail { border-left:0; border-top:1px solid var(--line); }
+}

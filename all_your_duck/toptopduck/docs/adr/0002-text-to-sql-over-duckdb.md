@@ -1,0 +1,27 @@
+# Execution model: Text-to-SQL over DuckDB
+
+## Decision
+
+自然语言 → 由 LLM 生成 **DuckDB SQL** → 在嵌入式 DuckDB 引擎上执行 → 返回结果集。**不**使用代码解释器（不生成、不执行任意 Python）。
+
+## Context
+
+执行模型是产品灵魂。备选有代码解释器（Pandas）、纯 SQL、受约束 DSL。需求格式含 JSON/Parquet/Excel，且用例含"处理"——表面上倾向代码解释器。
+
+## Why（为什么明知 JSON 与"处理"仍选纯 SQL）
+
+1. **格式广度不是问题**：DuckDB 原生直接读 CSV/Parquet/JSON（含嵌套），SQL 侧无短板。
+2. **爆炸半径小、更安全**：SQL 是声明式的，本地执行的"作恶面"远小于任意 Python 代码。
+3. **桌面包更轻**：无需捆绑 Python 运行时（省 ~30–50MB 与版本/分发复杂度）。
+4. **幻觉面更小**：约束到 SQL 文法，比生成自由代码更可控、更易校验。
+
+## Considered options
+
+- **代码解释器（Pandas + DuckDB）**：最灵活，但需捆绑 Python + 本地执行隔离，且任意代码风险更高。**否决**。
+- **受约束 DSL（function calling 操作目录）**：最安全，但要自建并长期维护一套操作目录，表达力受限。**否决**。
+
+## Consequences
+
+- **表达力有天花板**：SQL 擅长的关系查询/聚合/清洗/Pivot（DuckDB 支持 PIVOT）均 OK，**基础描述性统计与简单线性回归也在范围内**；但**预测/时序建模、机器学习、假设检验、任意自定义变换**不在本期（详见 ADR-0017 能力边界）。
+- 若未来出现强需求，需要一个**显式逃生舱**（如受控的代码执行扩展）——届时另立 ADR。**逃生舱由 ADR-0087 满足**：外部 MCP 工具（经文件中介与 DuckDB 协作）覆盖 SQL/DuckDB 原生能力之外的分析需求；agent 身份从"SQL 执行代理"降位为"数据分析 agent"，DuckDB 从唯一引擎降为默认工具。
+- LLM 生成 SQL 需强 schema 感知（表名/列名/类型），并需防注入与"查询不安全"的护栏。

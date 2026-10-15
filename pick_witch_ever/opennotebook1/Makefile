@@ -1,0 +1,64 @@
+.PHONY: dev migrate api-client check check-server check-web fmt up down e2e
+
+# FastAPI in server/, the React app in web/. Database settings come from
+# DATABASE_URL and TEST_DATABASE_URL, read from this file when it exists.
+ENV_FILE ?= $(HOME)/.config/opennotebook/db.env
+-include $(ENV_FILE)
+export DATABASE_URL TEST_DATABASE_URL
+UV ?= uv
+PNPM ?= pnpm
+
+## dev: the api on :8000, the worker, and the web app on :5173; the api and web reload on change
+dev: migrate
+	@trap 'kill 0' EXIT; \
+	(cd server && $(UV) run opennotebook serve --reload) & \
+	(cd server && $(UV) run opennotebook worker) & \
+	(cd web && $(PNPM) dev) & \
+	wait
+
+## migrate: bring the database up to the newest schema, on every branch of it
+migrate:
+	cd server && $(UV) run alembic upgrade heads
+
+## api-client: regenerate the web app's client from the server's OpenAPI
+api-client:
+	cd web && $(PNPM) api
+
+## check: everything CI runs
+check: check-server check-web
+
+check-server:
+	cd server && $(UV) run ruff format --check . && $(UV) run ruff check .
+	cd server && $(UV) run pyright
+	cd server && test "$$($(UV) run alembic heads | wc -l)" -eq 1 && $(UV) run alembic check
+	cd server && $(UV) run opennotebook openapi | diff -q ../web/openapi.json - >/dev/null || \
+		{ echo "web/openapi.json is out of date: run make api-client"; exit 1; }
+	cd server && $(UV) run pytest -q
+
+check-web:
+	cd web && $(PNPM) lint && $(PNPM) test && $(PNPM) build
+
+## fmt: format the server and fix what lint can
+fmt:
+	cd server && $(UV) run ruff format . && $(UV) run ruff check --fix .
+
+# ── Production and end-to-end ─────────────────────────────────────────────────
+
+# The production stack in deploy/: Caddy, the api, the worker, Postgres.
+# Settings come from deploy/.env (copy deploy/.env.example).
+# The dev database's DATABASE_URL, exported above, is kept out: compose would
+# take it over deploy/.env and point the containers at the wrong Postgres.
+COMPOSE ?= env -u DATABASE_URL -u TEST_DATABASE_URL docker compose -f deploy/compose.yaml
+
+## up: build and start the production stack in the background
+up:
+	@test -f deploy/.env || { echo "deploy/.env is missing: copy deploy/.env.example and fill it in"; exit 1; }
+	$(COMPOSE) up -d --build
+
+## down: stop the production stack; its data volumes are kept
+down:
+	$(COMPOSE) down
+
+## e2e: the Playwright suite against a running studio (make dev); E2E_URL picks another
+e2e:
+	cd web && $(PNPM) e2e

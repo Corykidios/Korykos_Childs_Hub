@@ -1,0 +1,31 @@
+__pycache__/
+*.pyc
+.venv/
+backend/data/
+backend/uploads/
+backend/logs/
+node_modules/
+dist/
+.pytest_cache/
+*.log
+.env
+log/
+.playwright-mcp/
+
+# Local working material, kept out of the published repo.
+# Implementation plans (task-by-task build scaffolding) and the running
+# polish backlog are working notes rather than documentation.
+docs/superpowers/
+docs/POLISH-BACKLOG.md
+
+# Study and authoring aids, generated from the codebase.
+docs/learning-hub.html
+docs/STUDY-GUIDE.md
+docs/build-hub.py
+docs/_hubdata.json
+docs/_quizzes.json
+docs/_verify_corpus.py
+docs/_ux_ideation_workflow.js
+docs/_extract_synth.py
+docs/seed-corpus-EXPANSION-prompt.md
+docs/seed-corpus-prompt.md

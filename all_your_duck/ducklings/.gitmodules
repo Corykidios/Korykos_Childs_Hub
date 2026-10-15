@@ -1,0 +1,31 @@
+[submodule "deps/duckdb"]
+	path = deps/duckdb
+	url = https://github.com/duckdb/duckdb.git
+
+[submodule "deps/duckdb-httpfs"]
+	path = deps/duckdb-httpfs
+	url = https://github.com/duckdb/duckdb-httpfs.git
+
+[submodule "deps/duckdb-iceberg"]
+	path = deps/duckdb-iceberg
+	url = https://github.com/duckdb/duckdb-iceberg.git
+
+[submodule "deps/duckdb-avro"]
+	path = deps/duckdb-avro
+	url = https://github.com/duckdb/duckdb_avro.git
+
+[submodule "deps/duckdb-quack"]
+	path = deps/duckdb-quack
+	url = https://github.com/duckdb/duckdb-quack.git
+
+[submodule "deps/ducklake"]
+	path = deps/ducklake
+	url = https://github.com/duckdb/ducklake.git
+
+[submodule "deps/nanoarrow"]
+	path = deps/nanoarrow
+	url = https://github.com/apache/arrow-nanoarrow.git
+[submodule "deps/duckdb-spatial"]
+	path = deps/duckdb-spatial
+	url = https://github.com/duckdb/duckdb-spatial.git
+	branch = v1.5-variegata

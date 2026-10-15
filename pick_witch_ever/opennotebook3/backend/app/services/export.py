@@ -1,0 +1,398 @@
+"""Export service for converting conversations and projects to various formats."""
+import json
+import os
+from pathlib import Path
+import tempfile
+import zipfile
+from typing import Tuple, Any, Dict, List
+from sqlalchemy.orm import Session
+import structlog
+
+from app.db.models import (
+    Project, Conversation, Message, Document, Chunk, ProjectDocument
+)
+from app.utils.time import utc_now
+
+logger = structlog.get_logger()
+MAX_BATCH_EXPORT_CONVERSATIONS = 100
+_BATCH_EXPORT_EXTENSIONS = {
+    "json": ".json",
+    "markdown": ".md",
+    "txt": ".txt",
+}
+
+
+class ExportService:
+    """Service for exporting data in various formats."""
+    
+    def export_conversation(
+        self,
+        db: Session,
+        conversation: Conversation,
+        format: str = "markdown",
+        include_citations: bool = True
+    ) -> Tuple[str, str, str]:
+        """Export a conversation to specified format.
+        
+        Returns: (content, content_type, filename)
+        """
+        if format == "markdown":
+            return self._export_conversation_markdown(conversation, include_citations)
+        elif format == "json":
+            return self._export_conversation_json(conversation, include_citations)
+        elif format == "txt":
+            return self._export_conversation_text(conversation, include_citations)
+        else:
+            raise ValueError(f"Unsupported format: {format}")
+    
+    def _export_conversation_markdown(
+        self, 
+        conversation: Conversation,
+        include_citations: bool
+    ) -> Tuple[str, str, str]:
+        """Export conversation as Markdown."""
+        content = f"# {conversation.title or 'Untitled Conversation'}\n\n"
+        content += f"**Created**: {conversation.created_at}\n"
+        content += f"**Updated**: {conversation.updated_at}\n\n"
+        content += "---\n\n"
+        
+        for message in conversation.messages:
+            # Add role header
+            if message.role == "user":
+                content += f"## 👤 User\n\n"
+            else:
+                content += f"## 🤖 Assistant\n\n"
+            
+            # Add message text
+            content += f"{message.text}\n\n"
+            
+            # Add citations if requested
+            if include_citations and message.citations_json:
+                citations = message.citations_json
+                if citations:
+                    content += "**Sources:**\n"
+                    for citation in citations:
+                        content += f"- {citation.get('document_title', 'Unknown')}"
+                        if citation.get('chunk_index'):
+                            content += f" (Chunk {citation['chunk_index']})"
+                        content += "\n"
+                    content += "\n"
+            
+            content += "---\n\n"
+        
+        filename = f"conversation_{conversation.id}_{utc_now().strftime('%Y%m%d')}.md"
+        return content, "text/markdown", filename
+    
+    def _export_conversation_json(
+        self,
+        conversation: Conversation,
+        include_citations: bool
+    ) -> Tuple[str, str, str]:
+        """Export conversation as JSON."""
+        data = {
+            "id": conversation.id,
+            "title": conversation.title,
+            "project_id": conversation.project_id,
+            "created_at": conversation.created_at.isoformat(),
+            "updated_at": conversation.updated_at.isoformat(),
+            "messages": []
+        }
+        
+        for message in conversation.messages:
+            msg_data = {
+                "id": message.id,
+                "role": message.role,
+                "text": message.text,
+                "created_at": message.created_at.isoformat()
+            }
+            
+            if include_citations and message.citations_json:
+                msg_data["citations"] = message.citations_json
+            
+            data["messages"].append(msg_data)
+        
+        content = json.dumps(data, indent=2, ensure_ascii=False)
+        filename = f"conversation_{conversation.id}_{utc_now().strftime('%Y%m%d')}.json"
+        return content, "application/json", filename
+    
+    def _export_conversation_text(
+        self,
+        conversation: Conversation,
+        include_citations: bool
+    ) -> Tuple[str, str, str]:
+        """Export conversation as plain text."""
+        content = f"{conversation.title or 'Untitled Conversation'}\n"
+        content += "=" * 50 + "\n\n"
+        
+        for message in conversation.messages:
+            role = "USER" if message.role == "user" else "ASSISTANT"
+            content += f"[{role}]:\n{message.text}\n\n"
+            
+            if include_citations and message.citations_json:
+                citations = message.citations_json
+                if citations:
+                    content += "Sources: "
+                    sources = [c.get('document_title', 'Unknown') for c in citations]
+                    content += ", ".join(sources) + "\n\n"
+            
+            content += "-" * 30 + "\n\n"
+        
+        filename = f"conversation_{conversation.id}_{utc_now().strftime('%Y%m%d')}.txt"
+        return content, "text/plain", filename
+    
+    def export_project(
+        self,
+        db: Session,
+        project: Project,
+        format: str = "json",
+        include_documents: bool = True,
+        include_conversations: bool = True
+    ) -> Tuple[str, str, str]:
+        """Export an entire project."""
+        if format == "json":
+            return self._export_project_json(
+                db, project, include_documents, include_conversations
+            )
+        elif format == "markdown":
+            return self._export_project_markdown(
+                db, project, include_documents, include_conversations
+            )
+        else:
+            raise ValueError(f"Unsupported format: {format}")
+    
+    def _get_project_documents(
+        self,
+        db: Session,
+        project: Project
+    ) -> List[Document]:
+        """Get the documents linked to a project."""
+        return db.query(Document).join(
+            ProjectDocument,
+            ProjectDocument.document_id == Document.id
+        ).filter(
+            ProjectDocument.project_id == project.id
+        ).all()
+
+    def _export_project_json(
+        self,
+        db: Session,
+        project: Project,
+        include_documents: bool,
+        include_conversations: bool
+    ) -> Tuple[str, str, str]:
+        """Export project as JSON."""
+        data = {
+            "id": project.id,
+            "name": project.name,
+            "description": project.description,
+            "created_at": project.created_at.isoformat(),
+            "updated_at": project.updated_at.isoformat(),
+            "meta": project.meta_json
+        }
+        
+        if include_documents:
+            data["documents"] = []
+            documents = self._get_project_documents(db, project)
+
+            for doc in documents:
+                doc_data = {
+                    "id": doc.id,
+                    "title": doc.title,
+                    "source_type": doc.source_type,
+                    "source_url": doc.source_url,
+                    "status": doc.status,
+                    "chunk_count": len(doc.chunks) if doc.chunks else 0
+                }
+                data["documents"].append(doc_data)
+        
+        if include_conversations:
+            data["conversations"] = []
+            conversations = db.query(Conversation).filter(
+                Conversation.project_id == project.id
+            ).all()
+            
+            for conv in conversations:
+                conv_data = {
+                    "id": conv.id,
+                    "title": conv.title,
+                    "message_count": len(conv.messages),
+                    "created_at": conv.created_at.isoformat()
+                }
+                data["conversations"].append(conv_data)
+        
+        content = json.dumps(data, indent=2, ensure_ascii=False)
+        filename = f"project_{project.id}_{utc_now().strftime('%Y%m%d')}.json"
+        return content, "application/json", filename
+    
+    def _export_project_markdown(
+        self,
+        db: Session,
+        project: Project,
+        include_documents: bool,
+        include_conversations: bool
+    ) -> Tuple[str, str, str]:
+        """Export project as Markdown."""
+        content = f"# {project.name}\n\n"
+        
+        if project.description:
+            content += f"## Description\n{project.description}\n\n"
+        
+        content += f"**Created**: {project.created_at}\n"
+        content += f"**Updated**: {project.updated_at}\n\n"
+        
+        if include_documents:
+            content += "## Documents\n\n"
+            documents = self._get_project_documents(db, project)
+
+            for doc in documents:
+                content += f"### {doc.title}\n"
+                content += f"- Type: {doc.source_type}\n"
+                content += f"- Status: {doc.status}\n"
+                if doc.source_url:
+                    content += f"- Source: {doc.source_url}\n"
+                content += f"- Chunks: {len(doc.chunks) if doc.chunks else 0}\n\n"
+        
+        if include_conversations:
+            content += "## Conversations\n\n"
+            conversations = db.query(Conversation).filter(
+                Conversation.project_id == project.id
+            ).all()
+            
+            for conv in conversations:
+                content += f"### {conv.title or 'Untitled'}\n"
+                content += f"- Messages: {len(conv.messages)}\n"
+                content += f"- Created: {conv.created_at}\n\n"
+        
+        filename = f"project_{project.id}_{utc_now().strftime('%Y%m%d')}.md"
+        return content, "text/markdown", filename
+    
+    def generate_project_summary(
+        self,
+        db: Session,
+        project: Project
+    ) -> Dict[str, Any]:
+        """Generate a summary of the project."""
+        # Get document statistics
+        documents = []
+        total_chunks = 0
+        
+        project_documents = self._get_project_documents(db, project)
+
+        for doc in project_documents:
+            chunk_count = len(doc.chunks) if doc.chunks else 0
+            total_chunks += chunk_count
+            
+            documents.append({
+                "id": doc.id,
+                "title": doc.title,
+                "source_type": doc.source_type,
+                "source_url": doc.source_url,
+                "status": doc.status,
+                "chunk_count": chunk_count
+            })
+        
+        # Get conversation statistics
+        conversations = db.query(Conversation).filter(
+            Conversation.project_id == project.id
+        ).order_by(Conversation.updated_at.desc()).limit(5).all()
+        
+        recent_conversations = []
+        total_messages = 0
+        
+        for conv in conversations:
+            message_count = len(conv.messages)
+            total_messages += message_count
+            
+            recent_conversations.append({
+                "id": conv.id,
+                "title": conv.title or "Untitled",
+                "message_count": message_count,
+                "created_at": conv.created_at.isoformat(),
+                "updated_at": conv.updated_at.isoformat()
+            })
+        
+        # Get total conversation count
+        conversation_count = db.query(Conversation).filter(
+            Conversation.project_id == project.id
+        ).count()
+        
+        return {
+            "project_id": project.id,
+            "project_name": project.name,
+            "document_count": len(documents),
+            "total_chunks": total_chunks,
+            "conversation_count": conversation_count,
+            "total_messages": total_messages,
+            "documents": documents,
+            "recent_conversations": recent_conversations
+        }
+    
+    def batch_export_conversations(
+        self,
+        db: Session,
+        conversation_ids: List[str],
+        format: str = "json"
+    ) -> str:
+        """Export multiple conversations to a ZIP file.
+
+        Args:
+            db: Database session used to load conversations.
+            conversation_ids: IDs to export, including repeated entries.
+            format: Member export format.
+
+        Returns:
+            Path to the created ZIP file.
+
+        Raises:
+            ValueError: If the batch exceeds the bounded export limit.
+        """
+        if len(conversation_ids) > MAX_BATCH_EXPORT_CONVERSATIONS:
+            raise ValueError(
+                "A batch export may contain at most "
+                f"{MAX_BATCH_EXPORT_CONVERSATIONS} conversations"
+            )
+
+        archive_fd, zip_path = tempfile.mkstemp(suffix=".zip")
+        try:
+            # ZipFile reopens by path. Closing the reserved descriptor first is
+            # required on Windows, where a second open may otherwise fail.
+            os.close(archive_fd)
+        except BaseException:
+            Path(zip_path).unlink(missing_ok=True)
+            raise
+
+        extension = _BATCH_EXPORT_EXTENSIONS.get(format, ".txt")
+        try:
+            with zipfile.ZipFile(
+                zip_path,
+                "w",
+                zipfile.ZIP_DEFLATED,
+            ) as archive:
+                for ordinal, conv_id in enumerate(conversation_ids, start=1):
+                    conversation = db.query(Conversation).filter(
+                        Conversation.id == conv_id
+                    ).first()
+
+                    if not conversation:
+                        logger.warning(f"Conversation {conv_id} not found")
+                        continue
+
+                    content, _, _filename = self.export_conversation(
+                        db,
+                        conversation,
+                        format,
+                        include_citations=True,
+                    )
+                    # Database IDs and titles must not become archive paths:
+                    # they can contain traversal or Windows-invalid characters.
+                    archive.writestr(
+                        f"conversation_{ordinal:03d}{extension}",
+                        content,
+                    )
+
+            return zip_path
+        except BaseException:
+            # The caller owns cleanup only after a complete archive is returned.
+            # Until then this service must remove exactly what it allocated.
+            Path(zip_path).unlink(missing_ok=True)
+            raise

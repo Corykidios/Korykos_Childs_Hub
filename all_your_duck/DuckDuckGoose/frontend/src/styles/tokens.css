@@ -1,0 +1,29 @@
+:root {
+  /* Backgrounds */
+  --bg:           #282c34;
+  --surface:      #1b1f27;
+  --surface-2:    #111111;
+  /* Borders */
+  --border:       rgba(53, 90, 102, 0.45);
+  --border-mid:   rgba(53, 90, 102, 0.70);
+  /* Text */
+  --text:         #9cdef2;
+  --text-muted:   #6b8a94;
+  --text-dim:     #4a6470;
+  /* Brand / chrome accent (interactive, never a data signal) */
+  --accent:       #e06c75;
+  --accent-dim:   rgba(224, 108, 117, 0.55);
+  --accent-bg:    rgba(224, 108, 117, 0.10);
+  /* Data semantics (never the accent) */
+  --success:      #50fa7b;
+  --danger:       #fb7185;
+  --warn:         #f0ad4e;
+  --info:         #56b6c2;
+  /* Typography */
+  --font-mono:    'Fira Code', 'DM Mono', ui-monospace, 'Cascadia Code', Consolas, monospace;
+  --font-display: 'Syne', system-ui, sans-serif;
+  /* Shape */
+  --radius:       6px;
+  --radius-lg:    8px;
+  --radius-xl:    10px;
+}

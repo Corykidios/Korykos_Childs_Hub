@@ -1,0 +1,706 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version_suffix:
+        description: 'Version suffix for dev release (e.g., -dev.1, -alpha.0, -beta.1). Leave empty for stable release.'
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: 'Dry run (no publish)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  EMSDK_VERSION: '4.0.22'
+  NODE_VERSION: '22'
+  NPM_VERSION: '11' # OIDC requires npm >= 11.5.1 and Node >= 22.14.0.
+  CF_PAGES_MAX_FILE_BYTES: '26214400'
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      npm_tag: ${{ steps.version.outputs.npm_tag }}
+      suffix: ${{ steps.version.outputs.suffix }}
+      dry_run: ${{ steps.version.outputs.dry_run }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Determine version and npm tag
+        id: version
+        run: |
+          MAKEFILE_VERSION=$(grep '^DUCKDB_VERSION' Makefile | sed 's/.*:= *v//')
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+            if [ "$TAG_VERSION" != "$MAKEFILE_VERSION" ]; then
+              echo "::error::Tag version ($TAG_VERSION) doesn't match DUCKDB_VERSION in Makefile ($MAKEFILE_VERSION)"
+              echo "::error::Update DUCKDB_VERSION in Makefile to v$TAG_VERSION before tagging"
+              exit 1
+            fi
+            VERSION="$TAG_VERSION"
+            SUFFIX=""
+          else
+            VERSION="$MAKEFILE_VERSION"
+            if [ -n "${{ github.event.inputs.version_suffix }}" ]; then
+              SUFFIX="${{ github.event.inputs.version_suffix }}"
+              VERSION="${VERSION}${SUFFIX}"
+            else
+              SUFFIX=$(grep '^VERSION_SUFFIX' Makefile | sed 's/.*:= *//')
+              VERSION="${VERSION}${SUFFIX}"
+            fi
+          fi
+
+          if [[ "$VERSION" == *"-dev"* ]] || [[ "$VERSION" == *"-alpha"* ]] || [[ "$VERSION" == *"-beta"* ]] || [[ "$VERSION" == *"-rc"* ]]; then
+            NPM_TAG="dev"
+          else
+            NPM_TAG="latest"
+          fi
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "npm_tag=$NPM_TAG" >> $GITHUB_OUTPUT
+          echo "suffix=$SUFFIX" >> $GITHUB_OUTPUT
+          echo "dry_run=${{ github.event.inputs.dry_run }}" >> $GITHUB_OUTPUT
+
+          echo "Release version: $VERSION (npm tag: $NPM_TAG)"
+
+  browser:
+    runs-on: ubuntu-latest
+    needs: version
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Emscripten SDK
+        uses: mymindstorm/setup-emsdk@v16
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+          actions-cache-folder: 'emsdk-cache'
+
+      - name: Add Emscripten upstream tools to PATH
+        run: echo "$EMSDK/upstream/bin" >> "$GITHUB_PATH"
+
+      - name: Verify toolchain
+        run: |
+          which emcc
+          emcc -v
+          which wasm-opt
+          wasm-opt --version
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+
+      - name: Build browser WASM
+        run: make duckdb-browser
+
+      - name: Report browser WASM size
+        run: |
+          SIZE=$(stat -c%s dist/duckdb.wasm)
+          LIMIT=${{ env.CF_PAGES_MAX_FILE_BYTES }}
+          echo "dist/duckdb.wasm: ${SIZE} bytes"
+          if [ "$SIZE" -gt "$LIMIT" ]; then
+            echo "::warning::dist/duckdb.wasm is ${SIZE} bytes, exceeds Cloudflare Pages limit ${LIMIT}. Package publishing continues; the Pages deploy job enforces the limit on the final built asset."
+          fi
+
+      - name: Upload browser WASM artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: duckdb-browser-dist
+          path: |
+            dist/duckdb.wasm
+            dist/duckdb.js
+          if-no-files-found: error
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@${{ env.NPM_VERSION }}
+
+      - name: Sync package versions
+        run: make sync-versions VERSION_SUFFIX="${{ needs.version.outputs.suffix }}"
+
+      - name: Install dependencies
+        run: |
+          cd packages/ducklings-browser && pnpm install --no-frozen-lockfile
+
+      - name: Build
+        run: |
+          cd packages/ducklings-browser
+          pnpm build
+
+      - name: Type check
+        run: |
+          cd packages/ducklings-browser && pnpm typecheck
+
+      - name: Test
+        run: |
+          cd packages/ducklings-browser && pnpm test
+
+      - name: Check npm package contents
+        working-directory: packages/ducklings-browser
+        run: npm pack --dry-run
+
+      - name: Publish @ducklings/browser
+        if: ${{ needs.version.outputs.dry_run != 'true' }}
+        run: |
+          cd packages/ducklings-browser
+          npm publish --access public --tag ${{ needs.version.outputs.npm_tag }}
+
+  workers:
+    runs-on: ubuntu-latest
+    needs: version
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Emscripten SDK
+        uses: mymindstorm/setup-emsdk@v16
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+          actions-cache-folder: 'emsdk-cache'
+
+      - name: Add Emscripten upstream tools to PATH
+        run: echo "$EMSDK/upstream/bin" >> "$GITHUB_PATH"
+
+      - name: Verify toolchain
+        run: |
+          which emcc
+          emcc -v
+          which wasm-opt
+          wasm-opt --version
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+
+      - name: Build base and Iceberg workers WASM
+        run: make duckdb-workers duckdb-workers-iceberg
+
+      - name: Upload workers WASM artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: duckdb-workers-dist
+          path: |
+            dist/duckdb-workers.wasm
+            dist/duckdb-workers.js
+            dist/duckdb-workers-iceberg.wasm
+            dist/duckdb-workers-iceberg.js
+          if-no-files-found: error
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@${{ env.NPM_VERSION }}
+
+      - name: Sync package versions
+        run: make sync-versions VERSION_SUFFIX="${{ needs.version.outputs.suffix }}"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build default and Iceberg packages
+        run: pnpm --filter @ducklings/workers --filter @ducklings/workers-iceberg -r build
+
+      - name: Type check
+        run: pnpm --filter @ducklings/workers --filter @ducklings/workers-iceberg -r typecheck
+
+      - name: Test
+        run: pnpm --filter @ducklings/workers --filter @ducklings/workers-iceberg -r test
+
+      - name: Build default and Iceberg examples
+        run: pnpm --filter @ducklings/example-cloudflare-worker --filter @ducklings/example-cloudflare-worker-iceberg -r build
+
+      - name: Pack default Workers npm package
+        working-directory: packages/ducklings-workers
+        run: npm pack --pack-destination ../../dist
+
+      - name: Upload default Workers npm package
+        uses: actions/upload-artifact@v7
+        with:
+          name: ducklings-workers-package
+          path: dist/ducklings-workers-${{ needs.version.outputs.version }}.tgz
+          if-no-files-found: error
+
+      - name: Pack Iceberg npm package
+        working-directory: packages/ducklings-workers-iceberg
+        run: npm pack --pack-destination ../../dist
+
+      - name: Upload Iceberg npm package
+        uses: actions/upload-artifact@v7
+        with:
+          name: ducklings-workers-iceberg-package
+          path: dist/ducklings-workers-iceberg-*.tgz
+          if-no-files-found: error
+
+      - name: Publish @ducklings/workers
+        if: ${{ needs.version.outputs.dry_run != 'true' }}
+        run: npm publish ./dist/ducklings-workers-${{ needs.version.outputs.version }}.tgz --access public --tag ${{ needs.version.outputs.npm_tag }}
+
+      - name: Publish @ducklings/workers-iceberg
+        if: ${{ needs.version.outputs.dry_run != 'true' }}
+        run: npm publish ./dist/ducklings-workers-iceberg-*.tgz --access public --tag ${{ needs.version.outputs.npm_tag }}
+
+  workers-ducklake:
+    runs-on: ubuntu-latest
+    needs: version
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Emscripten SDK
+        uses: mymindstorm/setup-emsdk@v16
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+          actions-cache-folder: 'emsdk-cache'
+
+      - name: Add Emscripten upstream tools to PATH
+        run: echo "$EMSDK/upstream/bin" >> "$GITHUB_PATH"
+
+      - name: Verify toolchain
+        run: |
+          which emcc
+          emcc -v
+          which wasm-opt
+          wasm-opt --version
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+
+      - name: Build DuckLake workers WASM
+        run: make duckdb-workers-ducklake
+
+      - name: Upload DuckLake workers WASM artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: duckdb-workers-ducklake-dist
+          path: |
+            dist/duckdb-workers-ducklake.wasm
+            dist/duckdb-workers-ducklake.js
+          if-no-files-found: error
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@${{ env.NPM_VERSION }}
+
+      - name: Sync package versions
+        run: make sync-versions VERSION_SUFFIX="${{ needs.version.outputs.suffix }}"
+
+      - name: Install dependencies
+        run: |
+          cd packages/ducklings-workers-ducklake && pnpm install --no-frozen-lockfile
+
+      - name: Build
+        run: |
+          cd packages/ducklings-workers-ducklake
+          pnpm build
+
+      - name: Type check
+        run: |
+          cd packages/ducklings-workers-ducklake && pnpm typecheck
+
+      - name: Test
+        run: |
+          cd packages/ducklings-workers-ducklake && pnpm test
+
+      - name: Check npm package contents
+        working-directory: packages/ducklings-workers-ducklake
+        run: npm pack --dry-run
+
+      - name: Publish @ducklings/workers-ducklake
+        if: ${{ needs.version.outputs.dry_run != 'true' }}
+        run: |
+          cd packages/ducklings-workers-ducklake
+          npm publish --access public --tag ${{ needs.version.outputs.npm_tag }}
+
+  workers-spatial:
+    runs-on: ubuntu-latest
+    needs: version
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Emscripten SDK
+        uses: mymindstorm/setup-emsdk@v16
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+          actions-cache-folder: 'emsdk-cache'
+
+      - name: Add Emscripten upstream tools to PATH
+        run: echo "$EMSDK/upstream/bin" >> "$GITHUB_PATH"
+
+      - name: Verify toolchain
+        run: |
+          which emcc
+          emcc -v
+          which wasm-opt
+          wasm-opt --version
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+
+      - name: Build Spatial workers WASM
+        run: make duckdb-workers-spatial
+
+      - name: Upload Spatial workers WASM artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: duckdb-workers-spatial-dist
+          path: |
+            dist/duckdb-workers-spatial.wasm
+            dist/duckdb-workers-spatial.js
+          if-no-files-found: error
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@${{ env.NPM_VERSION }}
+
+      - name: Sync package versions
+        run: make sync-versions VERSION_SUFFIX="${{ needs.version.outputs.suffix }}"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm --filter @ducklings/workers-spatial build
+
+      - name: Type check
+        run: pnpm --filter @ducklings/workers-spatial typecheck
+
+      - name: Check Worker bundle size
+        run: make check-worker-spatial-size
+
+      - name: Integration test (workerd)
+        run: pnpm --filter @ducklings/example-cloudflare-worker-spatial test
+
+      - name: Pack Spatial npm package
+        working-directory: packages/ducklings-workers-spatial
+        run: npm pack --pack-destination ../../dist
+
+      # Also available on dry runs for the first authenticated npm publication.
+      - name: Upload Spatial npm package
+        uses: actions/upload-artifact@v7
+        with:
+          name: ducklings-workers-spatial-package
+          path: dist/ducklings-workers-spatial-*.tgz
+          if-no-files-found: error
+
+      - name: Publish @ducklings/workers-spatial
+        if: ${{ needs.version.outputs.dry_run != 'true' }}
+        run: npm publish ./dist/ducklings-workers-spatial-*.tgz --access public --tag ${{ needs.version.outputs.npm_tag }}
+
+  # Deploy browser example to Cloudflare Pages
+  deploy-example-browser:
+    runs-on: ubuntu-latest
+    needs: [version, browser]
+    if: ${{ needs.version.outputs.dry_run != 'true' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      deployments: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      - name: Download browser WASM artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: duckdb-browser-dist
+          path: dist
+
+      - name: Sync package versions
+        run: make sync-versions VERSION_SUFFIX="${{ needs.version.outputs.suffix }}"
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build browser package
+        run: pnpm --filter @ducklings/browser build
+
+      - name: Build example
+        run: pnpm --filter @ducklings/example-browser build
+
+      - name: Check Pages browser asset size
+        run: |
+          LIMIT=${{ env.CF_PAGES_MAX_FILE_BYTES }}
+          WASM_FILE=$(find packages/example-browser/dist/assets -maxdepth 1 -type f -name 'duckdb-*.wasm' | head -n 1)
+          if [ -z "$WASM_FILE" ]; then
+            echo "::error::Could not find browser WASM asset in packages/example-browser/dist/assets"
+            find packages/example-browser/dist -maxdepth 2 -type f | sort
+            exit 1
+          fi
+          SIZE=$(stat -c%s "$WASM_FILE")
+          echo "${WASM_FILE}: ${SIZE} bytes"
+          if [ "$SIZE" -gt "$LIMIT" ]; then
+            echo "::error::${WASM_FILE} is ${SIZE} bytes, exceeds Cloudflare Pages limit ${LIMIT}"
+            exit 1
+          fi
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name ducklings
+          workingDirectory: packages/example-browser
+
+  # Deploy API documentation to Cloudflare Pages
+  deploy-documentation:
+    runs-on: ubuntu-latest
+    needs: [version, browser]
+    if: ${{ needs.version.outputs.dry_run != 'true' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      deployments: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      - name: Sync package versions
+        run: make sync-versions VERSION_SUFFIX="${{ needs.version.outputs.suffix }}"
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build documentation
+        run: pnpm --filter @ducklings/documentation build
+
+      - name: Validate Cloudflare credentials
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "Missing CLOUDFLARE_API_TOKEN"; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "Missing CLOUDFLARE_ACCOUNT_ID"; exit 1; }
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: packages/documentation
+          command: pages deploy dist --project-name ducklings-api --branch main
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [version, browser, workers, workers-ducklake, workers-spatial]
+    if: ${{ github.event_name == 'push' && needs.version.outputs.dry_run != 'true' }}
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download browser WASM artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: duckdb-browser-dist
+          path: dist
+
+      - name: Download workers WASM artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: duckdb-workers-dist
+          path: dist
+
+      - name: Download DuckLake workers WASM artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: duckdb-workers-ducklake-dist
+          path: dist
+
+      - name: Download Spatial workers WASM artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: duckdb-workers-spatial-dist
+          path: dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/duckdb.wasm
+            dist/duckdb-workers.wasm
+            dist/duckdb-workers-iceberg.wasm
+            dist/duckdb-workers-ducklake.wasm
+            dist/duckdb-workers-spatial.wasm
+          prerelease: ${{ needs.version.outputs.npm_tag == 'dev' }}
+          body: |
+            ## Ducklings v${{ needs.version.outputs.version }}
+
+            ### Packages
+            - [`@ducklings/browser`](https://www.npmjs.com/package/@ducklings/browser) - Browser version
+            - [`@ducklings/workers`](https://www.npmjs.com/package/@ducklings/workers) - Default Cloudflare Workers package with httpfs and Parquet
+            - [`@ducklings/workers-iceberg`](https://www.npmjs.com/package/@ducklings/workers-iceberg) - Cloudflare Workers version with Iceberg
+            - [`@ducklings/workers-ducklake`](https://www.npmjs.com/package/@ducklings/workers-ducklake) - Cloudflare Workers version with DuckLake
+            - [`@ducklings/workers-spatial`](https://www.npmjs.com/package/@ducklings/workers-spatial) - Cloudflare Workers version with Spatial
+
+            ### Installation
+            ```bash
+            # Browser
+            npm install @ducklings/browser@${{ needs.version.outputs.version }}
+
+            # Cloudflare Workers
+            npm install @ducklings/workers@${{ needs.version.outputs.version }}
+
+            # Explicit Iceberg package
+            npm install @ducklings/workers-iceberg@${{ needs.version.outputs.version }}
+
+            # Cloudflare Workers with DuckLake
+            npm install @ducklings/workers-ducklake@${{ needs.version.outputs.version }}
+
+            # Cloudflare Workers with Spatial
+            npm install @ducklings/workers-spatial@${{ needs.version.outputs.version }}
+            ```
+
+            ### Usage
+
+            **Browser:**
+            ```typescript
+            import { init, DuckDB } from '@ducklings/browser';
+
+            await init();
+            const db = new DuckDB();
+            const conn = db.connect();
+            const result = conn.query('SELECT 42 as answer');
+            ```
+
+            **Cloudflare Workers:**
+            ```typescript
+            import { init, DuckDB } from '@ducklings/workers';
+            import wasmModule from '@ducklings/workers/wasm';
+
+            await init({ wasmModule });
+            const db = new DuckDB();
+            const conn = db.connect();
+            const result = await conn.query('SELECT 42 as answer');
+            ```
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release summary
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ needs.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**npm tag:** ${{ needs.version.outputs.npm_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Dry run:** ${{ needs.version.outputs.dry_run == 'true' && 'Yes' || 'No' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Packages:" >> $GITHUB_STEP_SUMMARY
+          echo "- @ducklings/browser@${{ needs.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- @ducklings/workers@${{ needs.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- @ducklings/workers-iceberg@${{ needs.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- @ducklings/workers-ducklake@${{ needs.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- @ducklings/workers-spatial@${{ needs.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Package sizes:" >> $GITHUB_STEP_SUMMARY
+          echo "- duckdb.wasm: $(du -h dist/duckdb.wasm | cut -f1)" >> $GITHUB_STEP_SUMMARY
+          echo "- duckdb-workers.wasm: $(du -h dist/duckdb-workers.wasm | cut -f1)" >> $GITHUB_STEP_SUMMARY
+          echo "- duckdb-workers-iceberg.wasm: $(du -h dist/duckdb-workers-iceberg.wasm | cut -f1)" >> $GITHUB_STEP_SUMMARY
+          echo "- duckdb-workers-ducklake.wasm: $(du -h dist/duckdb-workers-ducklake.wasm | cut -f1)" >> $GITHUB_STEP_SUMMARY
+          echo "- duckdb-workers-spatial.wasm: $(du -h dist/duckdb-workers-spatial.wasm | cut -f1)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.version.outputs.npm_tag }}" = "dev" ]; then
+            echo "### Install dev version:" >> $GITHUB_STEP_SUMMARY
+            echo '```bash' >> $GITHUB_STEP_SUMMARY
+            echo "npm install @ducklings/browser@dev" >> $GITHUB_STEP_SUMMARY
+            echo "npm install @ducklings/workers@dev" >> $GITHUB_STEP_SUMMARY
+            echo "npm install @ducklings/workers-iceberg@dev" >> $GITHUB_STEP_SUMMARY
+            echo "npm install @ducklings/workers-ducklake@dev" >> $GITHUB_STEP_SUMMARY
+            echo "npm install @ducklings/workers-spatial@dev" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi

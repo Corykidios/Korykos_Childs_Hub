@@ -1,0 +1,187 @@
+"""Authentication router: register, sign in and identify the caller."""
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
+import structlog
+
+from app.db.database import get_db
+from app.config import Settings, get_settings
+from app.db.models import User
+from app.schemas import (
+    DemoAccountResponse,
+    TokenResponse,
+    UserRegister,
+    UserResponse,
+)
+from app.services.auth import AuthService, DuplicateUserError, get_auth_service
+from app.services.bootstrap import advertised_demo_account
+from app.routers.rate_limit import limit_login, limit_registration
+
+router = APIRouter()
+logger = structlog.get_logger()
+
+# auto_error=False so a missing header reaches get_current_user and produces the
+# same 401 as a bad one.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token", auto_error=False)
+
+INVALID_CREDENTIALS = "Incorrect username or password"
+BEARER_CHALLENGE = {"WWW-Authenticate": "Bearer"}
+
+
+def require_public_registration(
+    settings: Settings = Depends(get_settings),
+) -> None:
+    """Refuse public enrollment when the deployment has not enabled it.
+
+    Args:
+        settings: Application enrollment policy.
+
+    Returns:
+        None when public registration is enabled.
+
+    Raises:
+        HTTPException: With status 403 when enrollment is closed.
+    """
+    if not settings.allow_public_registration:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Public registration is disabled",
+        )
+
+
+async def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+    auth_service: AuthService = Depends(get_auth_service),
+) -> User:
+    """Resolve the bearer token to the signed-in account.
+
+    Args:
+        token: Presented bearer token, if any.
+        db: Database session.
+        auth_service: Token validation service.
+
+    Returns:
+        Active account identified by the token.
+    """
+    user = token and auth_service.get_user_from_token(db, token)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers=BEARER_CHALLENGE,
+        )
+    return user
+
+
+@router.post(
+    "/auth/register",
+    response_model=UserResponse,
+    dependencies=[Depends(require_public_registration), Depends(limit_registration)],
+)
+async def register(
+    user_data: UserRegister,
+    db: Session = Depends(get_db),
+    auth_service: AuthService = Depends(get_auth_service),
+):
+    """Register a new account when public enrollment is enabled.
+
+    Args:
+        user_data: Validated username, email, and password.
+        db: Database session.
+        auth_service: Account/password service.
+
+    Returns:
+        Created account without password material.
+    """
+    try:
+        return auth_service.register_user(
+            db,
+            username=user_data.username,
+            email=user_data.email,
+            password=user_data.password,
+        )
+    except DuplicateUserError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@router.post(
+    "/auth/token",
+    response_model=TokenResponse,
+    dependencies=[Depends(limit_login)],
+)
+async def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db),
+    auth_service: AuthService = Depends(get_auth_service),
+):
+    """Exchange username and password for an access token.
+
+    Args:
+        form_data: OAuth2 username/password form.
+        db: Database session.
+        auth_service: Account/password/token service.
+
+    Returns:
+        Signed bearer token response.
+    """
+    user = auth_service.authenticate_user(
+        db,
+        username=form_data.username,
+        password=form_data.password,
+    )
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=INVALID_CREDENTIALS,
+            headers=BEARER_CHALLENGE,
+        )
+
+    return TokenResponse(access_token=auth_service.create_access_token(user.username))
+
+
+@router.get("/auth/me", response_model=UserResponse)
+async def get_me(current_user: User = Depends(get_current_user)):
+    """Return the account the presented token belongs to."""
+    return current_user
+
+
+@router.get(
+    "/auth/demo-account",
+    response_model=DemoAccountResponse,
+    dependencies=[Depends(limit_login)],
+)
+async def get_demo_account(
+    db: Session = Depends(get_db),
+    auth_service: AuthService = Depends(get_auth_service),
+    settings: Settings = Depends(get_settings),
+):
+    """Tell the sign-in page which demo credentials it may offer.
+
+    Args:
+        db: Database session.
+        auth_service: Password hashing/account service.
+        settings: Demo-account policy for this deployment.
+
+    Returns:
+        The advertisable credentials, or a disabled response when there are
+        none. The stored password is verified, so this never advertises one
+        that would fail to sign in.
+    """
+    account = advertised_demo_account(
+        db,
+        auth_service,
+        enabled=settings.seed_demo_user,
+        username=settings.demo_username,
+        email=settings.demo_email,
+        password=settings.demo_password,
+    )
+    if account is None:
+        return DemoAccountResponse(enabled=False)
+    return DemoAccountResponse(
+        enabled=True,
+        username=account.username,
+        password=account.password,
+    )

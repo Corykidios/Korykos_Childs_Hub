@@ -1,0 +1,177 @@
+version: '3'
+
+env:
+  CGO_ENABLED: "1"
+
+vars:
+  BINARY: vibe
+  # `task install` stamps these into both binaries (release.yml stamps the same flags from the tag).
+  INSTALL_DIR: '{{.HOME}}/go/bin'
+  VERSION:
+    sh: git describe --tags --always --dirty
+  COMMIT:
+    sh: git rev-parse --short HEAD
+  DATE:
+    sh: date -u +%Y-%m-%dT%H:%M:%SZ
+  CLI_LDFLAGS: >-
+    -s -w
+    -X github.com/SandwichLabs/vibe/cmd.version={{.VERSION}}
+    -X github.com/SandwichLabs/vibe/cmd.commit={{.COMMIT}}
+    -X github.com/SandwichLabs/vibe/cmd.date={{.DATE}}
+  STUDIO_LDFLAGS: >-
+    -s -w
+    -X main.version={{.VERSION}}
+    -X main.commit={{.COMMIT}}
+    -X main.date={{.DATE}}
+
+tasks:
+  default:
+    desc: Lint, test, and build
+    cmds:
+      - task: lint
+      - task: test
+      - task: build
+
+  mod:
+    desc: Download and tidy Go modules
+    cmds:
+      - go mod download
+      - go mod tidy
+
+  build:
+    desc: Build the vibe binary
+    cmds:
+      - go build -o {{.BINARY}} ./cmd/vibe
+
+  test:
+    desc: Run all tests (Go + Studio frontend)
+    aliases: [t]
+    cmds:
+      - go test ./...
+      - task: test:frontend
+
+  test:frontend:
+    desc: Run Studio frontend component tests (vitest)
+    dir: studio/frontend
+    cmds:
+      - npm run test
+
+  typecheck:
+    desc: Type-check the Studio frontend (vue-tsc, blocking in CI)
+    dir: studio/frontend
+    cmds:
+      - npm run typecheck
+
+  test:coverage:
+    desc: Run tests with coverage report
+    cmds:
+      - go test -coverprofile=coverage.out ./...
+      - go tool cover -html=coverage.out -o coverage.html
+      - echo "Coverage report written to coverage.html"
+
+  lint:
+    desc: Run golangci-lint and the frontend type-check
+    cmds:
+      - golangci-lint run ./...
+      - task: typecheck
+
+  lint:fix:
+    desc: Run golangci-lint with auto-fix
+    cmds:
+      - golangci-lint run --fix ./...
+
+  notices:
+    desc: Regenerate THIRD_PARTY_NOTICES.md (Go via go-licenses, frontend via package-lock; fails on a non-permissive licence)
+    cmds:
+      - npm ci --prefix studio/frontend --no-audit --no-fund
+      - node scripts/gen-notices.mjs
+
+  notices:check:
+    desc: Fail when THIRD_PARTY_NOTICES.md is stale or a licence is not on the allow-list (CI runs the same)
+    cmds:
+      - node scripts/gen-notices.mjs --check
+
+  deps:refresh:
+    desc: After a dependency bump (e.g. a Dependabot PR) — regenerate THIRD_PARTY_NOTICES.md and studio/frontend/package.json.md5
+    cmds:
+      - task: notices
+      # The digest wails writes (no trailing newline); node, so it runs the same on macOS.
+      - node -e "process.stdout.write(require('crypto').createHash('md5').update(require('fs').readFileSync('studio/frontend/package.json')).digest('hex'))" > studio/frontend/package.json.md5
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -f {{.BINARY}}
+      - rm -f coverage.out coverage.html
+
+  studio:install:
+    desc: Install studio frontend dependencies
+    dir: studio/frontend
+    cmds:
+      - npm install
+
+  studio:dev:
+    desc: Run Vibe Studio in dev mode
+    dir: studio
+    cmds:
+      - wails dev -tags webkit2_41,duckdb_arrow
+
+  build:all:
+    desc: Build both CLI and Studio desktop app
+    cmds:
+      - task: build
+      - task: studio:install
+      - task: build:studio:linux
+
+  # The Studio build tasks stamp {{.VERSION}} into wails.json (productVersion, so the macOS bundle
+  # says it too) for the length of the build, then restore the file; the tree stays clean.
+  build:studio:
+    desc: Build Vibe Studio desktop app (macOS)
+    dir: studio
+    cmds:
+      # Deployment target for the host arch (docs/packaging.md); the bundle gets its release name.
+      - |
+        case "$(uname -m)" in arm64 | aarch64) arch=arm64 ;; *) arch=amd64 ;; esac
+        min="$(../scripts/macos-target.sh "$arch")"
+        export MACOSX_DEPLOYMENT_TARGET="$min" CGO_CFLAGS="-O2 -g -mmacosx-version-min=$min" CGO_LDFLAGS="-mmacosx-version-min=$min"
+        ../scripts/stamp-wails-version.sh '{{.VERSION}}' wails build -tags duckdb_arrow -ldflags "{{.STUDIO_LDFLAGS}}"
+        rm -rf "build/bin/Vibe Studio.app"
+        mv build/bin/vibe-studio.app "build/bin/Vibe Studio.app"
+
+  build:studio:linux:
+    desc: Build Vibe Studio desktop app (Linux)
+    dir: studio
+    cmds:
+      - ../scripts/stamp-wails-version.sh '{{.VERSION}}' wails build -tags webkit2_41,duckdb_arrow -ldflags "{{.STUDIO_LDFLAGS}}"
+
+  install:
+    desc: Versioned build of the vibe CLI and Vibe Studio into ~/go/bin (Linux)
+    cmds:
+      - task: install:cli
+      - task: install:studio
+
+  install:cli:
+    desc: Versioned build of the vibe CLI into ~/go/bin
+    cmds:
+      - mkdir -p {{.INSTALL_DIR}}
+      - go build -ldflags "{{.CLI_LDFLAGS}}" -o {{.INSTALL_DIR}}/{{.BINARY}} ./cmd/vibe
+      - '{{.INSTALL_DIR}}/{{.BINARY}} --version'
+
+  install:studio:
+    desc: Versioned build of Vibe Studio into ~/go/bin (Linux; `vibe studio --gui` finds it beside vibe)
+    platforms: [linux]
+    dir: studio
+    cmds:
+      - ../scripts/stamp-wails-version.sh '{{.VERSION}}' wails build -tags webkit2_41,duckdb_arrow -ldflags "{{.STUDIO_LDFLAGS}}"
+      - mkdir -p {{.INSTALL_DIR}}
+      - install -m 755 build/bin/vibe-studio {{.INSTALL_DIR}}/vibe-studio
+      - '{{.INSTALL_DIR}}/vibe-studio --version'
+
+  release:
+    desc: How to cut a release (there is no local release; CI builds it)
+    silent: true
+    cmds:
+      - |
+        echo "A release is: push a tag. .github/workflows/release.yml builds every platform and"
+        echo "creates a DRAFT release (tags with -rc or -test are prereleases); a human publishes it."
+        echo "  git tag -a vX.Y.Z -m 'Release vX.Y.Z' && git push origin vX.Y.Z"

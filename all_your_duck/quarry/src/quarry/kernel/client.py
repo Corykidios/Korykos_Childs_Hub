@@ -1,0 +1,307 @@
+"""Spawn and drive a kernel subprocess over a Unix socket."""
+
+from __future__ import annotations
+
+import contextlib
+import itertools
+import os
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from collections.abc import Callable
+from concurrent.futures import Future
+from pathlib import Path
+from typing import Final, TypeVar
+
+from pydantic import TypeAdapter, ValidationError
+
+from quarry.config import ENV_API_KEY
+from quarry.kernel.datasets import DatasetMeta
+from quarry.kernel.executor import ExecResult, QueryResult, ToCodeResult
+from quarry.kernel.protocol import (
+    InterruptResult,
+    Request,
+    Response,
+    decode_response,
+    encode,
+    read_lines,
+)
+from quarry.query.spec import Json, QuerySpec
+
+# How often a waiting caller checks that the kernel process still exists. The socket closing is
+# the usual sign of death, but a child the kernel forked can hold the socket open after it dies.
+_LIVENESS_POLL_SECONDS: Final = 0.5
+# How often spawn checks, while waiting for the kernel to connect, that it has not exited.
+_ACCEPT_POLL_SECONDS: Final = 0.1
+_DATASET_LIST: Final = TypeAdapter(list[DatasetMeta])
+_Result = TypeVar("_Result")
+
+
+class KernelDead(Exception):
+    """The kernel process exited or its socket broke."""
+
+
+class RpcFailure(Exception):
+    """The kernel answered with an error response."""
+
+    def __init__(self, type_: str, message: str) -> None:
+        super().__init__(f"{type_}: {message}")
+        self.type = type_
+        self.message = message
+
+
+class KernelClient:
+    def __init__(
+        self,
+        process: subprocess.Popen[bytes],
+        conn: socket.socket,
+        tmpdir: tempfile.TemporaryDirectory[str],
+    ) -> None:
+        self._process = process
+        self._conn = conn
+        self._tmpdir = tmpdir
+        self._ids = itertools.count(1)
+        self._pending: dict[int, Future[Response]] = {}
+        self._lock = threading.Lock()  # guards _pending, _dead and _group_killed
+        self._send_lock = threading.Lock()  # concurrent calls must not interleave their lines
+        self._dead = False
+        self._group_killed = False
+        threading.Thread(target=self._read_responses, daemon=True).start()
+
+    @classmethod
+    def spawn(cls, root: Path, *, threads: int = 0, startup_timeout: float = 30.0) -> KernelClient:
+        """Start a kernel for `root`; KernelDead if it cannot start, exits, or does not connect
+        in time. Whatever ends the call, no kernel outlives it unless it returns the client.
+
+        With `threads` above 0 the kernel's polars runs on that many. polars reads the limit
+        when it is imported, before the kernel reads its config, so it is set here.
+        """
+        # No provider API keys: step code can print its environment into a persisted result.
+        env = {k: v for k, v in os.environ.items() if k not in ENV_API_KEY.values()}
+        if threads > 0:
+            env["POLARS_MAX_THREADS"] = str(threads)
+        tmpdir: tempfile.TemporaryDirectory[str] | None = None
+        process: subprocess.Popen[bytes] | None = None
+        conn: socket.socket | None = None
+        try:
+            # A process the kernel started in its own session, which the group kill misses, can
+            # still write here, and then removing the directory fails.
+            tmpdir = tempfile.TemporaryDirectory(
+                prefix="quarry-kernel-", ignore_cleanup_errors=True
+            )
+            socket_path = Path(tmpdir.name) / "kernel.sock"
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                listener.bind(str(socket_path))
+                listener.listen(1)
+                # stdout and stderr are inherited: C-level output from user code goes to those
+                # fds, and a pipe nobody drains would block the kernel once it fills. A new
+                # session keeps a terminal Ctrl-C aimed at the server away from kernel steps.
+                process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-m",
+                        "quarry.kernel",
+                        "--socket",
+                        str(socket_path),
+                        "--root",
+                        str(root),
+                        "--temp-dir",
+                        tmpdir.name,
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    env=env,
+                    start_new_session=True,
+                )
+                conn = _accept(listener, process, startup_timeout)
+            return cls(process, conn, tmpdir)
+        except BaseException as exc:
+            # Not when `_accept` already killed and reaped it: the group's id may be reused.
+            if process is not None and process.returncode is None:
+                _kill_group(process)
+                process.wait()
+            if conn is not None:
+                conn.close()
+            if tmpdir is not None:
+                tmpdir.cleanup()
+            if isinstance(exc, OSError):  # a long TMPDIR ("AF_UNIX path too long"), no fork
+                raise KernelDead(f"cannot start the kernel: {exc}") from exc
+            raise
+
+    def execute(self, code: str) -> ExecResult:
+        return self._call_as(ExecResult.model_validate, "execute", {"code": code})
+
+    def interrupt(self) -> bool:
+        """Interrupt the running step; False when none was running, so nothing was."""
+        return self._call_as(InterruptResult.model_validate, "interrupt", {}).delivered
+
+    def describe(self, name: str) -> DatasetMeta:
+        return self._call_as(DatasetMeta.model_validate, "describe", {"name": name})
+
+    def list_datasets(self) -> list[DatasetMeta]:
+        return self._call_as(_DATASET_LIST.validate_python, "list_datasets", {})
+
+    def query(self, spec: QuerySpec) -> QueryResult:
+        return self._call_as(
+            QueryResult.model_validate, "query", {"spec": spec.model_dump(mode="json")}
+        )
+
+    def to_code(self, specs: list[QuerySpec]) -> str:
+        params: dict[str, Json] = {"specs": [s.model_dump(mode="json") for s in specs]}
+        return self._call_as(ToCodeResult.model_validate, "to_code", params).code
+
+    def snapshot(self, name: str, path: Path) -> DatasetMeta:
+        return self._call_as(
+            DatasetMeta.model_validate, "snapshot", {"name": name, "path": str(path)}
+        )
+
+    def shutdown(self) -> None:
+        """Stop the kernel, interrupting a running step; later calls raise KernelDead."""
+        with contextlib.suppress(KernelDead):  # already gone is as good as shut down
+            self._call("shutdown", {})
+        with self._lock:
+            self._dead = True  # calls already in flight still get their answers
+
+    @property
+    def pid(self) -> int:
+        """The kernel process id."""
+        return self._process.pid
+
+    def is_alive(self) -> bool:
+        return not self._dead and self._poll() is None
+
+    def close(self) -> None:
+        """Kill the kernel and what its steps started, and release its socket and directory.
+
+        Never raises for a kernel that outlives SIGKILL: it is left to the OS.
+        """
+        with self._lock:
+            # Once the kernel is reaped, `_poll` has killed its group: the group's id is the
+            # kernel's pid, which another process can have by now.
+            if self._process.returncode is None:
+                self._group_killed = True
+                _kill_group(self._process)
+        try:
+            self._process.wait(timeout=5)
+        except subprocess.TimeoutExpired:  # uninterruptible, say in a stuck disk read
+            print(
+                f"quarry: kernel {self.pid} outlived SIGKILL; leaving it to the OS", file=sys.stderr
+            )
+        finally:
+            with contextlib.suppress(OSError):  # the peer may already be gone
+                # Wakes the reader thread even if a child the kernel forked holds the socket open.
+                self._conn.shutdown(socket.SHUT_RDWR)
+            self._conn.close()
+            self._tmpdir.cleanup()
+
+    def _call_as(
+        self, validate: Callable[[Json], _Result], method: str, params: dict[str, Json]
+    ) -> _Result:
+        """The kernel's result for `method`, validated by `validate`; an answer that does not
+        validate is an RpcFailure, since the envelope was fine and the kernel is not dead."""
+        result = self._call(method, params)
+        try:
+            return validate(result)
+        except ValidationError as exc:
+            first = exc.errors()[0]
+            where = ".".join(str(part) for part in first["loc"]) or "the result"
+            raise RpcFailure("InvalidResult", f"{method}: {first['msg']} at {where}") from exc
+
+    def _call(self, method: str, params: dict[str, Json]) -> Json:
+        request = Request(id=next(self._ids), method=method, params=params)
+        future: Future[Response] = Future()
+        exited = self._poll() is not None
+        with self._lock:
+            # Checked under the lock: a call registered after _mark_dead would wait forever.
+            if self._dead or exited:
+                raise KernelDead("kernel is not running")
+            self._pending[request.id] = future
+        try:
+            with self._send_lock:
+                self._conn.sendall(encode(request))
+        except OSError as exc:
+            self._mark_dead("kernel socket closed")
+            raise KernelDead("kernel socket closed") from exc
+        response = self._wait(future)
+        if response.error is not None:
+            raise RpcFailure(response.error.type, response.error.message)
+        return response.result
+
+    def _wait(self, future: Future[Response]) -> Response:
+        """`future`'s response, or KernelDead once the kernel process has exited."""
+        while True:
+            try:
+                return future.result(timeout=_LIVENESS_POLL_SECONDS)
+            except TimeoutError:
+                code = self._poll()
+                if code is not None:
+                    self._mark_dead(f"kernel exited with code {code}")
+
+    def _poll(self) -> int | None:
+        """`Popen.poll()`, which reaps the kernel once it exited; the call that first sees it
+        exited kills its group, before the kernel's pid, the group's id, can be reused."""
+        with self._lock:
+            code = self._process.poll()
+            if code is not None and not self._group_killed:
+                self._group_killed = True
+                _kill_group(self._process)
+        return code
+
+    def _read_responses(self) -> None:
+        reason = "kernel closed its socket"
+        try:
+            for line in read_lines(self._conn):
+                response = decode_response(line)
+                with self._lock:
+                    future = self._pending.pop(response.id, None)
+                if future is not None:
+                    future.set_result(response)
+        except ValidationError as exc:  # a kernel that writes garbage is broken
+            reason = f"kernel sent an undecodable response: {exc.errors()[0]['msg']}"
+        finally:
+            self._mark_dead(reason)
+
+    def _mark_dead(self, reason: str) -> None:
+        with self._lock:
+            self._dead = True
+            pending = list(self._pending.values())
+            self._pending.clear()
+        for future in pending:
+            future.set_exception(KernelDead(reason))
+
+
+def _accept(
+    listener: socket.socket, process: subprocess.Popen[bytes], timeout: float
+) -> socket.socket:
+    """The kernel's connection; KernelDead as soon as it exits, or once `timeout` passes."""
+    listener.settimeout(_ACCEPT_POLL_SECONDS)
+    deadline = time.monotonic() + timeout
+    while (code := process.poll()) is None:
+        try:
+            conn, _ = listener.accept()
+        except TimeoutError:
+            if time.monotonic() < deadline:
+                continue
+            _kill_group(process)
+            process.wait()
+            raise KernelDead(f"kernel did not connect within {timeout} seconds") from None
+        conn.settimeout(None)
+        return conn
+    _kill_group(process)  # what it started, right after the poll that reaped it
+    raise KernelDead(f"kernel exited with code {code} before connecting")
+
+
+def _kill_group(process: subprocess.Popen[bytes]) -> None:
+    """SIGKILL the kernel and every process its steps started: the group the kernel leads.
+
+    Callers kill before they reap, or in the call that reaped, right after it, and never once
+    the kernel was reaped earlier: then its group can be empty, and another process can have
+    taken its pid, which is the group's id.
+    """
+    # ProcessLookupError: the group is empty. macOS raises PermissionError instead when only
+    # zombies are left in it, as when the kernel exited and nothing has reaped it yet.
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)

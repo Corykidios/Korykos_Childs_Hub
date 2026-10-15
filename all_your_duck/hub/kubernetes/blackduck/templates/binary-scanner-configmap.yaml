@@ -1,0 +1,12 @@
+{{- if or .Values.enableBinaryScanner }}
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  labels:
+    {{- include "bd.labels" . | nindent 4 }}
+    component: binaryscanner-configmap
+  name: {{ .Release.Name }}-binaryscanner-config
+  namespace: {{ .Release.Namespace }}
+data:
+    {{- include "binaryscanner.environs" . | nindent 2 }}
+{{- end }}
